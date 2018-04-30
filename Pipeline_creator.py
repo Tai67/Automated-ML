@@ -12,6 +12,7 @@ import datetime
 import numpy as np
 import pandas as pd
 import pickle
+import matplotlib.pyplot as plt
 
 from tpot import TPOTClassifier
 
@@ -156,7 +157,7 @@ def train_tpot(df, gen, pop, name, scorer, drop, save = True,
     t_pot.fit(X_train, y_train)
     #t_pot.score(X_test, y_test)
     
-    
+    x=t_pot.fitted_pipeline_
     if save :
         
         features.to_csv(name + ' features.csv', index = False)
@@ -168,8 +169,8 @@ def train_tpot(df, gen, pop, name, scorer, drop, save = True,
         with open((name+'.cfg'), 'wb') as pickle_file:
             pickle.dump({'df': df, 'gen' : gen, 'pop': pop, 'name':name, 
                          'function' : scorer, 'drop' : drop,'X_test':X_test,
-                         'y_test':y_test }, pickle_file)
-    x=t_pot.fitted_pipeline_
+                         'y_test':y_test, 'model':x }, pickle_file)
+
     return x
 
     
@@ -273,6 +274,7 @@ def Pipeline_eval (name='test', scorer=f1_scorer,
         print("Real test : ")
         Pred = model.predict(dic['X_test'])
         r1 = score(dic['y_test'],Pred, verbosity =1 )
+        r1['fscore']=scorer(dic['y_test'],Pred)
     else :
         r1 = None
         
@@ -282,12 +284,30 @@ def Pipeline_eval (name='test', scorer=f1_scorer,
 
     return {'r1': r1,'r2':r2}
 
+#------------------------------
+
+
+def pipeline_results_display(results, name, filename = None, save_d= True):
+    
+
+    plt.bar(list(results['r1'].keys()),list(results['r1'].values()), color='b')
+    plt.xlabel('Type of score')
+    plt.ylabel('Score')
+    plt.legend
+    plt.title(name)
+
+    if save_d:
+        assert filename!=None
+        plt.savefig((filename+'.png'))
+    plt.show()
+    
 
 #------------------------------
 
 def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer, 
                    drop=['ID','SCOREBDI', 'Gender','ds'], data_choice = 'cv', 
-                   pop = 500, gen = 10, th = 19,save=True):
+                   pop = 500, gen = 10, th = 19,save=True, display=True, 
+                   save_d= True):
     
     if save :
     
@@ -310,8 +330,14 @@ def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer,
                    pop = pop, gen = gen, th = th,save=save)
     
     results = Pipeline_eval(name=file_name, model=model, df=df, save=save)
+    
+    if display :
+        pipeline_results_display(results, name, filename=file_name, 
+                                 save_d=save_d)
+        
 
-    return results, model
+    
+    return results
 
 
 """
