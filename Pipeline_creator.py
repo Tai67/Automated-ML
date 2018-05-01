@@ -19,6 +19,7 @@ from tpot import TPOTClassifier
 
 from sklearn.metrics import f1_score
 from sklearn.metrics import make_scorer
+from sklearn.metrics import cohen_kappa_score
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import KFold
 
@@ -47,6 +48,7 @@ def ds_4CAT (x, threshhold = [10, 19, 29]):
 
 def ds_cs ( x, threshhold = 19 ):
     #Gets minimal and mild patients off the batch
+    #Lets undersample
     if x == 0:
         return 'Not depressive'
     elif x > threshhold :
@@ -108,6 +110,19 @@ def f1_scorer(Y_test, Y_pred, mean_type='macro'):
     #Return f1_score, without balancing between classes
     return f1_score(Y_test,Y_pred,average = mean_type )
 
+def kappa(Y_test, Y_pred, mean_type='macro'):
+    #Returns cohen kappa score between classes
+    Y_test=[1 if x=='Depressive' else 0 for x in Y_test]
+    Y_pred=[1 if x=='Depressive' else 0 for x in Y_pred]
+    return cohen_kappa_score(Y_test,Y_pred)
+
+#def s_kappa(Y_test, Y_pred, mean_type='macro',weights='quadratic'):
+#    #Returns cohen kappa score between classes
+#    return cohen_kappa_score(Y_test,Y_pred,weights=weights )
+
+
+
+
 #----------------------------------
 
 # Returns cv, ct or both combined in one csv
@@ -146,14 +161,15 @@ def train_tpot(df, gen, pop, name, scorer, drop, save = True,
     features = df.drop(drop,axis=1)
     target = df.ds
         
-    X_train, X_test, y_train, y_test = train_test_split(\
+    X_train, X_test, y_train, y_test = train_test_split(
             features,target,
             train_size=0.75, test_size=0.25)
         
         
     t_pot = TPOTClassifier(generations=gen, population_size=pop, 
-                               verbosity=3,n_jobs=proc, scoring=scorer 
+                               verbosity=2,n_jobs=proc, scoring=scorer 
                                )
+
     t_pot.fit(X_train, y_train)
     #t_pot.score(X_test, y_test)
     
@@ -219,13 +235,13 @@ def score(Y_test, Y_pred, verbosity=0):
 
 
 def score_model(data,model, drop=['ID','SCOREBDI', 'Gender','ds'],
-                score=score):
+                score=score, verbosity=1, scorer=f1_scorer):
     
     X = data.drop(drop,axis=1)
     Y = data.ds
     
     
-    kf = KFold(n_splits=5,shuffle=True)
+    kf = KFold(n_splits=2,shuffle=True)
     Results = []
     
     for train_index, test_index in kf.split(X):
@@ -234,9 +250,11 @@ def score_model(data,model, drop=['ID','SCOREBDI', 'Gender','ds'],
         m = model
         m.fit(X_train,Y_train)
         Y_pred = m.predict(X_test)
-        out = score(Y_test, Y_pred,verbosity = 1)
-        c= f1_scorer(Y_test, Y_pred)
-        Results.append({'sens': out['sens'], 'spec':out['spec'], 'fscore':c})
+        
+        out = score(Y_test, Y_pred,verbosity = verbosity)
+        
+        c= scorer(Y_test, Y_pred)
+        Results.append({'sens': out['sens'], 'spec':out['spec'], 'score':c})
     return Results
 
 
@@ -250,10 +268,9 @@ def Pipeline_maker(name='test', s_filter=ds_2CAT, scorer=f1_scorer,
                    drop=['ID','SCOREBDI', 'Gender','ds'], data_choice = 'cv', 
                    pop = 500, gen = 10, th = 19,save=True):
     
-    score_pipe=make_scorer(f1_scorer)
-
+    score_pipe=make_scorer(scorer)
     df = categorized(load_data(data_choice),s_filter=s_filter, th=th) 
-    print(df.shape)
+    #print(df.shape)
     model = train_tpot(df, gen, pop, name, score_pipe, drop, save)
     
     return model, df
@@ -265,48 +282,81 @@ def Pipeline_maker(name='test', s_filter=ds_2CAT, scorer=f1_scorer,
 
 def Pipeline_eval (name='test', scorer=f1_scorer, 
                    drop=['ID','SCOREBDI', 'Gender','ds'],model=None, df= None,
-                   save=True):
+                   save=True, verbosity=1):
     
     if save :
         with open((name+'.cfg'), 'rb') as pickle_file:
             dic=pickle.load(pickle_file)    
-    
-        print("Real test : ")
+        if verbosity >0:
+            print("Real test : ")
         Pred = model.predict(dic['X_test'])
-        r1 = score(dic['y_test'],Pred, verbosity =1 )
-        r1['fscore']=scorer(dic['y_test'],Pred)
+        r1 = score(dic['y_test'],Pred, verbosity =verbosity )
+        r1['score']=scorer(dic['y_test'],Pred)
     else :
         r1 = None
-        
-    print(" Reroll : ")
-    r2 = score_model(df, model)
+    
+    if verbosity >0:
+        print(" Reroll : ")
+    r2 = score_model(df, model,verbosity=verbosity)
     
 
     return {'r1': r1,'r2':r2}
 
 #------------------------------
+# Matplotlib graph generating functions
 
-
-def pipeline_results_display(results, name, filename = None, save_d= True):
+def pipeline_results_display(results, name, filename = None, save_d= True, 
+                             scorer=f1_scorer):
     
 
-    plt.bar(list(results['r1'].keys()),list(results['r1'].values()), color='b')
+    plt.axes([0,0,1,1])
+    plt.bar(list(results.keys()),list(results.values()), color='b')
     plt.xlabel('Type of score')
     plt.ylabel('Score')
     plt.legend
-    plt.title(name)
+    plt.title(name+' True score')
 
     if save_d:
         assert filename!=None
-        plt.savefig((filename+'.png'))
+        plt.savefig((filename+' tr.png'))
     plt.show()
+
+
+
+def pipeline_retest_results_display(results, name, filename = None, 
+                                    save_d= True,scorer=f1_scorer):
     
+    df=pd.DataFrame.from_dict(results)
+
+    #plt.axes([0,0,15,1])
+    
+    plt.bar([str(x+1)+' '+scorer.__name__ for x in range(len(df.iloc[:, 0]))],df.iloc[:, 0], 
+             color='b')
+    plt.bar([str(x+1)+' Sensitivity' for x in range(len(df.iloc[:, 0]))],df.iloc[:, 1], 
+             color='r')
+    plt.bar([str(x+1)+' Specificity' 
+             for x in range(len(df.iloc[:, 0]))],df.iloc[:, 2], color='c')
+    
+    
+    plt.xlabel('Type of score')
+    plt.ylabel('Score')
+    plt.legend
+    plt.title(name+' retest')
+
+    if save_d:
+        assert filename!=None
+        plt.savefig((filename+'retest .png'))
+    plt.xticks(rotation=-45)
+    plt.show()
+
+
 
 #------------------------------
 
 def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer, 
                    drop=['ID','SCOREBDI', 'Gender','ds'], data_choice = 'cv', 
                    pop = 500, gen = 10, th = 19,save=True, display=True, 
+                   c_display=1,
                    save_d= True):
     
     if save :
@@ -325,32 +375,23 @@ def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer,
             os.makedirs((name+' '+file_id))
             file_name = './'+ name+' '+file_id+'/'+name
     
-    model, df = Pipeline_maker (name=file_name, s_filter=s_filter, scorer=scorer, 
-                   drop=drop, data_choice = data_choice, 
-                   pop = pop, gen = gen, th = th,save=save)
+    model, df = Pipeline_maker (name=file_name, s_filter=s_filter, 
+                                scorer=scorer, 
+                                drop=drop, data_choice = data_choice, 
+                                pop = pop, gen = gen, th = th,save=save)
     
-    results = Pipeline_eval(name=file_name, model=model, df=df, save=save)
+    results = Pipeline_eval(name=file_name, model=model, df=df, save=save, 
+                            verbosity = c_display,scorer=scorer)
     
     if display :
-        pipeline_results_display(results, name, filename=file_name, 
-                                 save_d=save_d)
+        pipeline_results_display(results['r1'], name, filename=file_name, 
+                                 save_d=save_d, scorer=scorer)
         
+        pipeline_retest_results_display(results['r2'], name, filename=file_name, 
+                                 save_d=save_d, scorer=scorer)
 
     
     return results
 
 
-"""
-def score_model(data,model=v1_model):
-    X = data.drop(['SCOREBDI','ID','Gender','ds'],axis=1)
-    Y = data.ds
-    kf = KFold(n_splits=5)
-    for train_index, test_index in kf.split(X):
-        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
-        Y_train, Y_test = Y.iloc[train_index], Y.iloc[test_index]
-        m = model()
-        m.fit(X_train,Y_train)
-        Y_pred = m.predict(X_test)
-        print(mean_absolute_error(Y_test,Y_pred))
-    return m.fit(X,Y)
-"""
+
