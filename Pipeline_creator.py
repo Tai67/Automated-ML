@@ -55,19 +55,158 @@ def ds_cs ( x, threshhold = 19 ):
         return 'Depressive'
     else :
         return np.nan
+    
+#----------------------------------
+
+#Filter functions for binary classification
+   
+def ds_cs_b ( x, threshhold = 19 ):
+    #Gets minimal and mild patients off the batch
+    #Lets undersample
+    if x == 0:
+        return 0
+    elif x > threshhold :
+        return 1
+    else :
+        return np.nan
+
+#----------------------------------
+      
+#/!\ BETA !
+# Gets some absurd values out of the batch, corrects them with normalized 
+# values
+                
+def repartition (df, marks,name='test') :
+    x,i = pd.DataFrame(columns=df.keys()), 0
+    #print(marks)
+    for val_id_list in marks :
+        row = pd.Series(name=str(i))
+        row.rename(str(row))
+        for key in df.keys():
+            row[key]= False
+            if str(key) in val_id_list :
+                row[key]=True
+        #print(row)
+        x.loc[i] = row
+        i+=1
+    print(x)
+    
+    
+    x.to_csv(path_or_buf=name + "repartition.csv")
+    
+
+
+def normalize(df, drop=['ID','SCOREBDI', 'Gender','ds','Age'],verbosity = 0, 
+              name=None): 
+    
+    datas= df.drop(drop,axis=1)
+    marks= []
+    av_size=[]
+
+    #Moyenne des valeurs des patients.  
+    for x in datas.iterrows() :
+        mean=0
+        for keys in x[1].keys() :
+            mean = mean + x[1][keys]
+            mean = mean/float(len(x[1].keys()))
+            av_size.append(mean)
+
+            
+    u_a_l_born= {} # Dictionnaire de valeurs relatives aux keys
+    for key in datas :
+        median = datas[key].median()
+        std= datas[key].std()
+        factor = 3
+        u_a_l_born[key] = {'down':(float(median-(factor*std))), 
+                               'up':float(median+(factor*std)), 
+                               'median': median}
+    
+    u_a_l_born=pd.DataFrame.from_dict(u_a_l_born)
+        
+    easy=pd.Series(av_size)
+    median = easy.median()
+
+    correction, nr_w_datas = 0, 0
+    
+    for x in datas.iterrows() :
+        
+        i=0
+        marked, bol = [], False
+        
+        
+        for keys in x[1].keys() :
+            
+            if not(u_a_l_born[keys]['down']<    #if value is not in an interval
+                   x[1][keys]< 
+                   u_a_l_born[keys]['up']):
+                
+                if verbosity >= 2 :
+                    print(u_a_l_born[keys]['down'],' < ' ,
+                          x[1][keys],' < ',u_a_l_born[keys]['up'])
+                    
+                marked.append(keys)             
+                                    # Mark Patient, inc amount omp
+                if bol==False :
+                    nr_w_datas +=1
+                    bol = True
+                
+                ratio = av_size[i]/median     #Normalize the value
+                datas[keys][x[0]] = int(ratio*u_a_l_born[keys]['median'])
+                
+                if verbosity>=2:
+                    print('Now : ',
+                          int(ratio*u_a_l_born[keys]['median']) )
+                correction+=1
+            i+=1
+        marks.append(marked)
+            
+            
+    if verbosity>0 :
+        
+        print("Total de valeurs :", datas.shape[0]*datas.shape[1])
+        print("Corrections : ", correction)
+        print("Marked Patients : ", nr_w_datas)
+        print(len(marks))
+        
+    df.to_csv(path_or_buf=name +"Original.csv", index=False)
+    for keys in datas.keys() :
+        df[keys] = datas[keys]
+    datas.to_csv(path_or_buf=name + "correct.csv", index=False)
+
+
+    s = []
+    for i in marks:
+        for k in i :
+            if k not in s:
+                s.append(k)
+    repartition(df, marks, name)
+    
+    print("Valeurs : ", len(s))
+    return df, pd.Series(marks).values
+
+
+def cleanse(df,drop,name = None, verbosity = 0):    
+    #Gets questionnable patients data out
+    
+    results=normalize(df,drop, verbosity,name=name)
+    datas = results[0]
+    marks = results[1]
+    datas['marks']=marks
+    if name!=None :
+        datas.to_csv(path_or_buf=name+"correct 3.csv", index=False)
+    return datas.drop('marks', axis=1)
+    
 
 #----------------------------------
 
 def categorized(df, s_filter = ds_2CAT, th =19):
-    # Returns the final processed Dataframe
+    # Returns a preprocessed Dataframe with target score
     
     result = df.copy()
     result['ds'] = df.SCOREBDI.apply(s_filter, threshhold=th)
     
-    if s_filter == ds_cs :
-        return result.dropna()
-    
-    return result
+    return result.dropna()
+
 
 #----------------------------------        
 # Bunch of evaluating functions
@@ -80,9 +219,9 @@ def sens_spec_score(Y_test, Y_pred):
     Y_pred=Y_pred.tolist()
     zipped=zip(Y_test,Y_pred)
     n_dep,  pp_diag,n_ndep, np_diag = (0,0,0,0)
-
+    
     for x in list (zipped):
-
+        
         if x[0] == 'Depressive':
             n_dep+=1
         else :
@@ -92,19 +231,20 @@ def sens_spec_score(Y_test, Y_pred):
             pp_diag +=1
         elif x[0]==x[1] and x[1]=='Not depressive':
             np_diag +=1
-
+            
     if n_dep!=0 :
         Sensitivity = np.float64(pp_diag/n_dep)
     else :
         Sensitivity = 0
-
+        
     if n_ndep!= 0 :    
         Specificity = np.float64(np_diag/n_ndep)
     else :
         Specificity = 0
-    score = np.float64((Sensitivity + Specificity)/2)
-
+    score = np.float64(((Sensitivity * Specificity)*2)/
+                       (Sensitivity + Specificity))
     return score
+
 
 def f1_scorer(Y_test, Y_pred, mean_type='macro'):
     #Return f1_score, without balancing between classes
@@ -131,22 +271,22 @@ def kappa(Y_test, Y_pred, mean_type='macro'):
     
 def load_data(data_choice = 'cv' ):
 
-    data_file_1 = "1000BRAINS_BDI_Score_CT.csv"
-    data_file_2 = "1000BRAINS_BDI_Score_Vol.csv"
+    data_file_1 = "1000BRAINS_BDI_Score_Vol.csv"
+    data_file_2 = "1000BRAINS_BDI_Score_CT.csv"
     df= None
     
     if data_choice == 'cv':
-        df = pd.read_csv(data_file_1,sep=',').dropna()
+        df = pd.read_csv(data_file_1,sep=';').dropna()
     elif data_choice == 'ct':
-        df = pd.read_csv(data_file_2,sep=';').dropna()
+        df = pd.read_csv(data_file_2,sep=',').dropna()
         
     elif data_choice == 'both' :
-        df1 = pd.read_csv(data_file_1,sep=',').dropna()
-        df2 = pd.read_csv(data_file_2,sep=';').dropna()
+        df1 = pd.read_csv(data_file_1,sep=';').dropna()
+        df2 = pd.read_csv(data_file_2,sep=',').dropna()
         df = pd.merge(df1,df2)
     else :
         raise
-
+        
     return df
 
 
@@ -266,10 +406,15 @@ def score_model(data,model, drop=['ID','SCOREBDI', 'Gender','ds'],
 
 def Pipeline_maker(name='test', s_filter=ds_2CAT, scorer=f1_scorer, 
                    drop=['ID','SCOREBDI', 'Gender','ds'], data_choice = 'cv', 
-                   pop = 500, gen = 10, th = 19,save=True):
+                   pop = 500, gen = 10, th = 19,save=True, 
+                   normalization =False):
     
     score_pipe=make_scorer(scorer)
     df = categorized(load_data(data_choice),s_filter=s_filter, th=th) 
+    
+    if normalization:
+        df = cleanse (df,drop,name=name)
+        print("Normalized")
     #print(df.shape)
     model = train_tpot(df, gen, pop, name, score_pipe, drop, save)
     
@@ -357,7 +502,8 @@ def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer,
                    drop=['ID','SCOREBDI', 'Gender','ds'], data_choice = 'cv', 
                    pop = 500, gen = 10, th = 19,save=True, display=True, 
                    c_display=1,
-                   save_d= True):
+                   save_d= True,
+                   norm= False):
     
     if save :
     
@@ -378,7 +524,8 @@ def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer,
     model, df = Pipeline_maker (name=file_name, s_filter=s_filter, 
                                 scorer=scorer, 
                                 drop=drop, data_choice = data_choice, 
-                                pop = pop, gen = gen, th = th,save=save)
+                                pop = pop, gen = gen, th = th,save=save,
+                                normalization=norm)
     
     results = Pipeline_eval(name=file_name, model=model, df=df, save=save, 
                             verbosity = c_display,scorer=scorer)
@@ -394,4 +541,15 @@ def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer,
     return results
 
 
-
+#---------------------------
+#    
+#df = categorized(load_data('cv'),s_filter=ds_cs_b, th=19) 
+#x=normalize(df)
+##
+##
+##
+#
+#    
+#    
+#    
+    
