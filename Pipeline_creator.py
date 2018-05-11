@@ -77,39 +77,41 @@ def ds_cs_b ( x, threshhold = 19 ):
 # values
                 
 def repartition (df, marks,name='test') :
+    # Used to analyze which brain's region are affected by modifications
     x,i = pd.DataFrame(columns=df.keys()), 0
     #print(marks)
     for val_id_list in marks :
         row = pd.Series(name=str(i))
         row.rename(str(row))
         for key in df.keys():
-            row[key]= False
+            row[key]= np.nan
             if str(key) in val_id_list :
                 row[key]=True
         #print(row)
-        x.loc[i] = row
-        i+=1
-    print(x)
-    
-    
+        x.loc[i] = row.copy()
+        i+=1    
+    # Exports the analyzes to csv 
     x.to_csv(path_or_buf=name + "repartition.csv")
+    x.sum().to_csv(path=name + "sommes.csv")
     
 
 
-def normalize(df, drop=['ID','SCOREBDI', 'Gender','ds','Age'],verbosity = 0, 
+def mark_and_normalize(df, drop=['ID','SCOREBDI', 'Gender','ds','Age'],verbosity = 1, 
               name=None): 
     
     datas= df.drop(drop,axis=1)
     marks= []
     av_size=[]
 
-    #Moyenne des valeurs des patients.  
-    for x in datas.iterrows() :
-        mean=0
-        for keys in x[1].keys() :
-            mean = mean + x[1][keys]
-            mean = mean/float(len(x[1].keys()))
-            av_size.append(mean)
+    #Median patients value  
+    av_size = datas.median(axis=1).tolist()
+    
+#    for x in datas.iterrows() :
+#        mean=0
+#        for keys in x[1].keys() :
+#            mean = mean + x[1][keys]
+#            mean = mean/float(len(x[1].keys()))
+#            av_size.append(mean)
 
             
     u_a_l_born= {} # Dictionnaire de valeurs relatives aux keys
@@ -125,10 +127,18 @@ def normalize(df, drop=['ID','SCOREBDI', 'Gender','ds','Age'],verbosity = 0,
         
     easy=pd.Series(av_size)
     median = easy.median()
-
     correction, nr_w_datas = 0, 0
     
-    for x in datas.iterrows() :
+    # Scans the datas for extreme values
+    # These Values are, for each patient, appended to "marks" (list of lists)
+    # Marks is sent to "Repartition" for analyses
+    # A new value is calculated for the abnormal value 
+    # After the median value of the data and the median value of the patient's
+    # data (~)
+    # This values are then put into df
+    # Original and Modified values are saved in a csv File
+    
+    for x in datas.iterrows() : 
         
         i=0
         marked, bol = [], False
@@ -159,7 +169,11 @@ def normalize(df, drop=['ID','SCOREBDI', 'Gender','ds','Age'],verbosity = 0,
                 correction+=1
             i+=1
         marks.append(marked)
-            
+        
+    repartition(datas, marks, name) 
+    # Produces some Data analyses - no effect 
+    # Number of abnormal value per region    
+    
             
     if verbosity>0 :
         
@@ -167,34 +181,45 @@ def normalize(df, drop=['ID','SCOREBDI', 'Gender','ds','Age'],verbosity = 0,
         print("Corrections : ", correction)
         print("Marked Patients : ", nr_w_datas)
         print(len(marks))
-        
+     
+    #Keeps track
     df.to_csv(path_or_buf=name +"Original.csv", index=False)
     for keys in datas.keys() :
-        df[keys] = datas[keys]
-    datas.to_csv(path_or_buf=name + "correct.csv", index=False)
+        df[keys] = datas[keys].copy()
+    datas.to_csv(path_or_buf=name + "Correct.csv", index=False)
 
-
+    # Calculates and displays how much area's are having abnorm values
     s = []
     for i in marks:
         for k in i :
             if k not in s:
                 s.append(k)
-    repartition(df, marks, name)
-    
     print("Valeurs : ", len(s))
-    return df, pd.Series(marks).values
+    
+    return df, pd.Series(marks).values # Returns altered, normalized values
+    #And a list of every marked / modified value
 
 
-def cleanse(df,drop,name = None, verbosity = 0):    
+def analyse_and_clean(df,drop,name = None, clean=False, verbosity = 1):    
     #Gets questionnable patients data out
     
-    results=normalize(df,drop, verbosity,name=name)
-    datas = results[0]
-    marks = results[1]
+    
+    results=mark_and_normalize(df,drop, verbosity,name=name)
+    datas = results[0].copy()
+    marks = results[1].copy()
     datas['marks']=marks
+    
     if name!=None :
-        datas.to_csv(path_or_buf=name+"correct 3.csv", index=False)
-    return datas.drop('marks', axis=1)
+        
+        datas.to_csv(path_or_buf=name+"abnormal patient datas.csv", 
+                     index=False)
+    if clean :
+        # Signalize a modification of the Dataset ( experimental )
+        print("Normalized")
+        return datas.drop('marks', axis=1)
+    else :
+        # Proceeded to anaylze - no modification
+        return df 
     
 
 #----------------------------------
@@ -407,14 +432,16 @@ def score_model(data,model, drop=['ID','SCOREBDI', 'Gender','ds'],
 def Pipeline_maker(name='test', s_filter=ds_2CAT, scorer=f1_scorer, 
                    drop=['ID','SCOREBDI', 'Gender','ds'], data_choice = 'cv', 
                    pop = 500, gen = 10, th = 19,save=True, 
-                   normalization =False):
+                   normalization =False, clean=False):
     
     score_pipe=make_scorer(scorer)
     df = categorized(load_data(data_choice),s_filter=s_filter, th=th) 
-    
+    copy = df.copy()
     if normalization:
-        df = cleanse (df,drop,name=name)
-        print("Normalized")
+        df = analyse_and_clean (df,drop,name=name,clean = clean).copy()
+        if clean==False:       
+            assert copy.keys().all()==df.keys().all(), "Label added or substracted in spite of Arg !"
+
     #print(df.shape)
     model = train_tpot(df, gen, pop, name, score_pipe, drop, save)
     
@@ -503,7 +530,8 @@ def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer,
                    pop = 500, gen = 10, th = 19,save=True, display=True, 
                    c_display=1,
                    save_d= True,
-                   norm= False):
+                   norm= False,
+                   clean=False):
     
     if save :
     
@@ -525,7 +553,7 @@ def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer,
                                 scorer=scorer, 
                                 drop=drop, data_choice = data_choice, 
                                 pop = pop, gen = gen, th = th,save=save,
-                                normalization=norm)
+                                normalization=norm,clean=clean)
     
     results = Pipeline_eval(name=file_name, model=model, df=df, save=save, 
                             verbosity = c_display,scorer=scorer)
