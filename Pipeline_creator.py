@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 
 from tpot import TPOTClassifier
 
-
+from pandas.util.testing import assert_frame_equal
 from sklearn.metrics import f1_score
 from sklearn.metrics import make_scorer
 from sklearn.metrics import cohen_kappa_score
@@ -74,8 +74,8 @@ def ds_cs_b ( x, threshhold = 19 ):
       
 #/!\ BETA !
 # Gets some absurd values out of the batch, corrects them with normalized 
-# values
-                
+# values              
+
 def repartition (df, marks,name='test') :
     # Used to analyze which brain's region are affected by modifications
     x,i = pd.DataFrame(columns=df.keys()), 0
@@ -94,12 +94,15 @@ def repartition (df, marks,name='test') :
     x.to_csv(path_or_buf=name + "repartition.csv")
     x.sum().to_csv(path=name + "sommes.csv")
     
-
-
-def mark_and_normalize(df, drop=['ID','SCOREBDI', 'Gender','ds','Age'],verbosity = 1, 
-              name=None): 
     
-    datas= df.drop(drop,axis=1)
+    return x.sum()
+
+
+def mark_and_normalize(df, drop_a,
+                       verbosity = 1, 
+                       name=None, factor=3): 
+    
+    datas= df.drop(drop_a,axis=1).copy()
     marks= []
     av_size=[]
 
@@ -118,7 +121,6 @@ def mark_and_normalize(df, drop=['ID','SCOREBDI', 'Gender','ds','Age'],verbosity
     for key in datas :
         median = datas[key].median()
         std= datas[key].std()
-        factor = 3
         u_a_l_born[key] = {'down':(float(median-(factor*std))), 
                                'up':float(median+(factor*std)), 
                                'median': median}
@@ -146,9 +148,10 @@ def mark_and_normalize(df, drop=['ID','SCOREBDI', 'Gender','ds','Age'],verbosity
         
         for keys in x[1].keys() :
             
-            if not(u_a_l_born[keys]['down']<    #if value is not in an interval
+            if (not(u_a_l_born[keys]['down']<    #if value is not in an interval
                    x[1][keys]< 
-                   u_a_l_born[keys]['up']):
+                   u_a_l_born[keys]['up'])) \
+            or int(x[1][keys])<5:
                 
                 if verbosity >= 2 :
                     print(u_a_l_born[keys]['down'],' < ' ,
@@ -170,17 +173,16 @@ def mark_and_normalize(df, drop=['ID','SCOREBDI', 'Gender','ds','Age'],verbosity
             i+=1
         marks.append(marked)
         
-    repartition(datas, marks, name) 
+    mask = repartition(datas, marks, name) 
     # Produces some Data analyses - no effect 
     # Number of abnormal value per region    
     
             
     if verbosity>0 :
         
-        print("Total de valeurs :", datas.shape[0]*datas.shape[1])
+        print("Total values :", datas.shape[0]*datas.shape[1])
         print("Corrections : ", correction)
         print("Marked Patients : ", nr_w_datas)
-        print(len(marks))
      
     #Keeps track
     df.to_csv(path_or_buf=name +"Original.csv", index=False)
@@ -194,19 +196,24 @@ def mark_and_normalize(df, drop=['ID','SCOREBDI', 'Gender','ds','Age'],verbosity
         for k in i :
             if k not in s:
                 s.append(k)
-    print("Valeurs : ", len(s))
+    print("Features with abnormal values : ", len(s))
     
-    return df, pd.Series(marks).values # Returns altered, normalized values
+    return df, pd.Series(marks).values, mask # Returns altered, normalized values
     #And a list of every marked / modified value
 
 
-def analyse_and_clean(df,drop,name = None, clean=False, verbosity = 1):    
-    #Gets questionnable patients data out
+def analyse_and_clean(df,drop_a=['ID','SCOREBDI', 'Gender','ds','Age'],
+                      name = None, clean=False, verbosity = 1, factor = 3,
+                      dynamic_drop=False):    
+    #if clean = true : Gets questionnable patients data out + analyzis
+    # Clean = False : Returns original DB with analysis
     
-    
-    results=mark_and_normalize(df,drop, verbosity,name=name)
+    copy = df.copy()
+    results=mark_and_normalize(df,drop_a=drop_a, verbosity=verbosity,
+                               name=name, factor = factor)
     datas = results[0].copy()
     marks = results[1].copy()
+    mask = results[2].copy()
     datas['marks']=marks
     
     if name!=None :
@@ -216,10 +223,17 @@ def analyse_and_clean(df,drop,name = None, clean=False, verbosity = 1):
     if clean :
         # Signalize a modification of the Dataset ( experimental )
         print("Normalized")
-        return datas.drop('marks', axis=1)
-    else :
+        copy = datas.drop('marks', axis=1).copy()
+    
+    if dynamic_drop :
+        new_drop = []
+        print(mask)
+        for key in mask.keys():
+            if mask[key] != 0:
+                new_drop.append(key)
+        copy = copy.drop(new_drop,axis=1).copy()
         # Proceeded to anaylze - no modification
-        return df 
+    return copy 
     
 
 #----------------------------------
@@ -266,10 +280,9 @@ def sens_spec_score(Y_test, Y_pred):
         Specificity = np.float64(np_diag/n_ndep)
     else :
         Specificity = 0
-    score = np.float64(((Sensitivity * Specificity)*2)/
+        
+    return np.float64(((Sensitivity * Specificity)*2)/
                        (Sensitivity + Specificity))
-    return score
-
 
 def f1_scorer(Y_test, Y_pred, mean_type='macro'):
     #Return f1_score, without balancing between classes
@@ -320,10 +333,10 @@ def load_data(data_choice = 'cv' ):
 #TPOT pipeline generating & training function
 # The df & training + scoring parameter are saved in a pickle dictionnary
     
-def train_tpot(df, gen, pop, name, scorer, drop, save = True,
+def train_tpot(df, gen, pop, name, scorer, save = True,
                proc=1):
         
-    features = df.drop(drop,axis=1)
+    features = df.drop('ds',axis=1)
     target = df.ds
         
     X_train, X_test, y_train, y_test = train_test_split(
@@ -349,7 +362,7 @@ def train_tpot(df, gen, pop, name, scorer, drop, save = True,
         
         with open((name+'.cfg'), 'wb') as pickle_file:
             pickle.dump({'df': df, 'gen' : gen, 'pop': pop, 'name':name, 
-                         'function' : scorer, 'drop' : drop,'X_test':X_test,
+                         'function' : scorer,'X_test':X_test,
                          'y_test':y_test, 'model':x }, pickle_file)
 
     return x
@@ -399,10 +412,10 @@ def score(Y_test, Y_pred, verbosity=0):
 
 
 
-def score_model(data,model, drop=['ID','SCOREBDI', 'Gender','ds'],
+def score_model(data,model, 
                 score=score, verbosity=1, scorer=f1_scorer):
     
-    X = data.drop(drop,axis=1)
+    X = data.drop('ds',axis=1)
     Y = data.ds
     
     
@@ -422,6 +435,33 @@ def score_model(data,model, drop=['ID','SCOREBDI', 'Gender','ds'],
         Results.append({'sens': out['sens'], 'spec':out['spec'], 'score':c})
     return Results
 
+#----------------------------------
+    
+# gathers all steps of the data alteration
+
+def data_preprocessing(name='test', s_filter=ds_2CAT, 
+            drop=['ID','SCOREBDI', 'Gender'], data_choice = 'cv', 
+            normalization=False ,clean= False, th=19,factor = 3,
+            dynamic_drop=False):
+    
+    df = categorized(load_data(data_choice),s_filter=s_filter, th=th).copy()
+    df['Gender']= df.Gender.apply(lambda x: 1 if x=='Female' else 0)
+    copy = df.copy()
+    
+    if normalization:
+        df = analyse_and_clean (df,name=name,
+                                clean = clean, factor = factor,
+                                dynamic_drop=dynamic_drop).copy()
+        if clean==False and dynamic_drop == False:   
+            assert_frame_equal(copy,df,
+                        check_exact= True,check_dtype = False, 
+                        check_categorical = False, check_names = False
+                        )
+            
+    assert copy.keys().all()==df.keys().all(), \
+        "Label added or substracted in spite of Arg "
+        
+    return df.drop(drop,axis=1)
 
 
 #----------------------------------
@@ -429,31 +469,23 @@ def score_model(data,model, drop=['ID','SCOREBDI', 'Gender','ds'],
 #Creates the evaluation function, shapes the datas and creates + trains the model
 
 
-def Pipeline_maker(name='test', s_filter=ds_2CAT, scorer=f1_scorer, 
-                   drop=['ID','SCOREBDI', 'Gender','ds'], data_choice = 'cv', 
-                   pop = 500, gen = 10, th = 19,save=True, 
-                   normalization =False, clean=False):
+def Pipeline_maker(df, name='test', scorer=f1_scorer,  
+                   pop = 500, gen = 10, th = 19,save=True):
     
     score_pipe=make_scorer(scorer)
-    df = categorized(load_data(data_choice),s_filter=s_filter, th=th) 
-    copy = df.copy()
-    if normalization:
-        df = analyse_and_clean (df,drop,name=name,clean = clean).copy()
-        if clean==False:       
-            assert copy.keys().all()==df.keys().all(), "Label added or substracted in spite of Arg !"
 
     #print(df.shape)
-    model = train_tpot(df, gen, pop, name, score_pipe, drop, save)
+    model = train_tpot(df, gen, pop, name, score_pipe, save)
     
-    return model, df
+    return model
 
         
 #------------------------------
 
 
 
-def Pipeline_eval (name='test', scorer=f1_scorer, 
-                   drop=['ID','SCOREBDI', 'Gender','ds'],model=None, df= None,
+def Pipeline_eval (name='test', scorer=f1_scorer,
+                   model=None, df= None,
                    save=True, verbosity=1):
     
     if save :
@@ -526,12 +558,13 @@ def pipeline_retest_results_display(results, name, filename = None,
 #------------------------------
 
 def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer, 
-                   drop=['ID','SCOREBDI', 'Gender','ds'], data_choice = 'cv', 
+                   drop=['ID','SCOREBDI', 'Gender','Age'], data_choice = 'cv', 
                    pop = 500, gen = 10, th = 19,save=True, display=True, 
                    c_display=1,
                    save_d= True,
                    norm= False,
-                   clean=False):
+                   clean=False,
+                   factor = 3, dynamic_drop=False):
     
     if save :
     
@@ -549,11 +582,16 @@ def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer,
             os.makedirs((name+' '+file_id))
             file_name = './'+ name+' '+file_id+'/'+name
     
-    model, df = Pipeline_maker (name=file_name, s_filter=s_filter, 
-                                scorer=scorer, 
-                                drop=drop, data_choice = data_choice, 
-                                pop = pop, gen = gen, th = th,save=save,
-                                normalization=norm,clean=clean)
+    
+    df = data_preprocessing(name=file_name, s_filter=s_filter, 
+                            drop=drop, data_choice = data_choice, 
+                            normalization=norm ,clean= clean, th=th,
+                            factor = factor, dynamic_drop=dynamic_drop)
+
+    df.to_csv(file_name + ' post preprocessing.csv', index = False)
+    
+    model = Pipeline_maker (df, name=file_name, scorer=scorer, 
+                            pop = pop, gen = gen, th = th,save=save)
     
     results = Pipeline_eval(name=file_name, model=model, df=df, save=save, 
                             verbosity = c_display,scorer=scorer)
