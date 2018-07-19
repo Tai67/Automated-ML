@@ -6,7 +6,7 @@ Created on Sat Apr 28 19:34:04 2018
 """
 
 # Pipeline-creation set
-import tpot
+import tpot 
 import os
 import datetime
 import numpy as np
@@ -16,15 +16,22 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from tpot import TPOTClassifier
+from tpot import TPOTRegressor
+from pandas import ExcelWriter
+
 
 from pandas.util.testing import assert_frame_equal
 from sklearn.metrics import f1_score
 from sklearn.metrics import make_scorer
 from sklearn.metrics import cohen_kappa_score
+from sklearn.metrics import roc_auc_score
+
+from sklearn.base import clone
+
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import KFold
 
-# Bunch of filter functions to diagnose between patients
+# Bunch of filter functions
 
 def ds_2CAT (x, threshhold=19):
     if x < threshhold :
@@ -46,7 +53,6 @@ def ds_4CAT (x, threshhold = [10, 19, 29]):
     else :
         return "severe"
 
-
 def ds_cs ( x, threshhold = 19 ):
     #Gets minimal and mild patients off the batch
     #Lets undersample
@@ -56,11 +62,18 @@ def ds_cs ( x, threshhold = 19 ):
         return 'Depressive'
     else :
         return np.nan
+
     
 #----------------------------------
 
 #Filter functions for binary classification
-   
+
+def ds_2CAT_b (x, threshhold=19):
+    if x < threshhold :
+        return 0
+    else :
+        return 1
+
 def ds_cs_b ( x, threshhold = 19 ):
     #Gets minimal and mild patients off the batch
     #Lets undersample
@@ -70,6 +83,12 @@ def ds_cs_b ( x, threshhold = 19 ):
         return 1
     else :
         return np.nan
+    
+def d_only_b ( x, threshhold = 19 ):
+    
+    if x>= 19   :  return 1
+    else        :  return np.nan
+
 
 #----------------------------------
       
@@ -92,8 +111,8 @@ def repartition (df, marks,name='test') :
         x.loc[i] = row.copy()
         i+=1    
     # Exports the analyzes to csv 
-    x.to_csv(path_or_buf=name + "repartition.csv")
-    x.sum().to_csv(path=name + "sommes.csv")
+    x.to_csv(path_or_buf=(name + " repartition.csv"))
+    x.sum().to_frame().to_csv(path_or_buf=(name + " sommes.csv"))
     
     
     return x.sum()
@@ -109,14 +128,7 @@ def mark_and_normalize(df, drop_a,
 
     #Median patients value  
     av_size = datas.median(axis=0)
-    
-#    for x in datas.iterrows() :
-#        mean=0
-#        for keys in x[1].keys() :
-#            mean = mean + x[1][keys]#            mean = mean/float(len(x[1].keys()))
-#            av_size.append(mean)
-
-            
+         
     u_a_l_born= {} # Dictionnaire de valeurs relatives aux keys
     for key in datas :
         median = datas[key].median()
@@ -132,7 +144,7 @@ def mark_and_normalize(df, drop_a,
     # Scans the datas for extreme values
     # These Values are, for each patient, appended to "marks" (list of lists)
     # Marks is sent to "Repartition" for analyses
-    # A new value is calculated for the abnormal value 
+    # A new value is calculated for the abnormal value ( if clean = TRUE)
     # After the median value of the data and the median value of the patient's
     # data (~)
     # This values are then put into df
@@ -182,10 +194,10 @@ def mark_and_normalize(df, drop_a,
         print("Marked Patients : ", nr_w_datas)
      
     #Keeps track
-    df.to_csv(path_or_buf=name +"Original.csv", index=False)
+    df.to_csv(path_or_buf=(name +" original.csv"), index=False)
     for keys in datas.keys() :
         df[keys] = datas[keys].copy()
-    datas.to_csv(path_or_buf=name + "Correct.csv", index=False)
+    datas.to_csv(path_or_buf=(name + " correct.csv"), index=False)
 
     # Calculates and displays how much area's are having abnorm values
     s = []
@@ -215,7 +227,7 @@ def analyse_and_clean(df,drop_a=['ID','SCOREBDI', 'Gender','ds','Age'],
     
     if name!=None :
         
-        datas.to_csv(path_or_buf=name+"abnormal patient datas.csv", 
+        datas.to_csv(path_or_buf=(name+" abnormal patient datas.csv"), 
                      index=False)
     if clean :
         # Signalize a modification of the Dataset ( experimental )
@@ -281,6 +293,10 @@ def sens_spec_score(Y_test, Y_pred):
     return np.float64(((Sensitivity * Specificity)*2)/
                        (Sensitivity + Specificity))
 
+def roc_auc_scorer(Y_test, Y_pred, average = 'macro'):
+    return roc_auc_score(Y_test, Y_pred,average = 'macro')
+
+
 def f1_scorer(Y_test, Y_pred, mean_type='macro'):
     #Return f1_score, without balancing between classes
     return f1_score(Y_test,Y_pred,average = mean_type )
@@ -308,6 +324,7 @@ def load_data(data_choice = 'cv' ):
 
     data_file_1 = "1000BRAINS_BDI_Score_Vol.csv"
     data_file_2 = "1000BRAINS_BDI_Score_CT.csv"
+#    data_file_3 = "
     df= None
     
     if data_choice == 'cv':
@@ -334,23 +351,28 @@ def load_data(data_choice = 'cv' ):
 # The df & training + scoring parameter are saved in a pickle dictionnary
     
 def train_tpot(df, gen, pop, name, scorer, save = True,
-               proc=1,target='ds'):
+               proc=1,target='ds', classification=True,
+               config_dict=None, rand=23):
         
     features = df.drop(target,axis=1)
     target = df[target]
     
     if save :    
-        features.to_csv(name + ' features.csv', index = False)
-        target.to_csv(name + ' targets.csv', index = False)
+        features.to_csv(path_or_buf=(name + ' features.csv'), index = False)
+        target.to_csv(path=(name + ' targets.csv'), index = False)
         
 #    X_train, X_test, y_train, y_test = train_test_split(
 #            features,target,
 #            train_size=0.75, test_size=0.25)
         
-        
-    t_pot = TPOTClassifier(generations=gen, population_size=pop, 
-                               verbosity=2,n_jobs=proc, scoring=scorer 
-                               )
+    if classification :    
+        t_pot = TPOTClassifier(generations=gen, population_size=pop, 
+                                   verbosity=2,n_jobs=proc, scoring=scorer, 
+                                   config_dict=config_dict, random_state=rand)
+    else :
+        t_pot = TPOTRegressor(generations=gen, population_size=pop, 
+                                   verbosity=2,n_jobs=proc, scoring=scorer,
+                                   config_dict=config_dict, random_state=rand)
 
     t_pot.fit(features, target)
     #t_pot.score(X_test, y_test)
@@ -364,17 +386,27 @@ def train_tpot(df, gen, pop, name, scorer, save = True,
         with open((name+'.cfg'), 'wb') as pickle_file:
             pickle.dump({'df': df, 'gen' : gen, 'pop': pop, 'name':name, 
                          'function' : scorer,'X_test':features,
-                         'y_test':target, 'model':x, 'pipeline':t_pot }, 
+                         'y_test':target, 'model':x }, 
                          pickle_file)
 
     return x
 
-    
+#----------------------------------
+def classifier (x):
+    if x==0:
+        return 'Not depressive'
+    else:
+        return 'Depressive'
 #----------------------------------
 # Score can only be used to quantify Sensitivity and Specificity for DS Scoring
 
 def score(Y_test, Y_pred, verbosity=0):
     #mean_absolute_error(Y_test,Y_pred)
+    Y_pred = pd.Series(Y_pred) # pred = pd.Series for character support
+
+    if Y_test.iloc[0]==0 or Y_test.iloc[0]==1:
+        Y_test= Y_test.apply(classifier)
+        Y_pred= Y_pred.apply(classifier)
     Y_test=Y_test.tolist()
     Y_pred=Y_pred.tolist()
     zipped=zip(Y_test,Y_pred)
@@ -417,41 +449,78 @@ def score(Y_test, Y_pred, verbosity=0):
 # Sens and spec dependent on 'score', should only be used for ds 
 
 def score_model(data,model, target = 'ds',
-                score=score, verbosity=1, scorer=f1_scorer):
+                score=score, verbosity=1, scorer=f1_scorer, 
+                return_algorythms=False, cv=3):
     
     X = data.drop(target,axis=1)
     Y = data[target]
     
+    if return_algorythms: produced_algorithms=[]
     
-    kf = KFold(n_splits=2,shuffle=True)
-    Results = []
+    results = pd.DataFrame(columns=['sens', 'spec', 'score']) 
     
-    for train_index, test_index in kf.split(X):
-        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
-        Y_train, Y_test = Y.iloc[train_index], Y.iloc[test_index]
-        m = model
-        m.fit(X_train,Y_train)
-        Y_pred = m.predict(X_test)
+    for i in range(10) :
         
-        out = score(Y_test, Y_pred,verbosity = verbosity)
+        if return_algorythms: produced_algorithms.append([])
         
-        c= scorer(Y_test, Y_pred)
-        Results.append({'sens': out['sens'], 'spec':out['spec'], 'score':c})
-    return Results
+        kf = KFold(n_splits=cv,shuffle=True)
+        exp = pd.DataFrame(columns=['sens', 'spec', 'score'])
+        for train_index, test_index in kf.split(X):
+            X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+            Y_train, Y_test = Y.iloc[train_index], Y.iloc[test_index]
+            m = model
+            m.fit(X_train,Y_train)
+            Y_pred = m.predict(X_test)
+        
+            out = score(Y_test, Y_pred,verbosity = verbosity)
+        
+            c= scorer(Y_test, Y_pred)
 
+            exp = exp.append({'sens': out['sens'], 'spec':out['spec'], 
+                'score':c}, ignore_index=True)
+                
+            if return_algorythms: produced_algorithms[i].append(m)
+
+        results = results.append({'sens': exp['sens'].mean(), 
+                                  'spec':exp['spec'].mean(), 
+                                  'score':exp['score'].mean()},
+                                ignore_index=True)
+    print(results)   
+    ret=pd.DataFrame({'sens': results['sens'].mean(), 
+                                'spec':results['spec'].mean(), 
+                                'score':results['score'].mean()},index=[0])
+    print(ret)
+    
+    if not(return_algorythms):
+        return ret
+    else :
+        return ret, produced_algorithms
 #----------------------------------
     
 # gathers all steps of the data alteration
 
 def data_preprocessing(name='test', s_filter=ds_2CAT, 
-            drop=['ID','SCOREBDI', 'Gender'], data_choice = 'cv', 
+            drop=['ID','SCOREBDI'], data_choice = 'cv', 
             normalization=False ,clean= False, th=19,
-            factor = 3,dynamic_drop=False,ban_thresh = 10, target = 'ds' ):
+            factor = 3,dynamic_drop=False,ban_thresh = 10, target = 'ds',
+            gender = None, age = None, undersample = None, rand = 23):
     
     df = categorized(load_data(data_choice),s_filter=s_filter, th=th).copy()
     
     if target!='Gender':
         df['Gender']= df.Gender.apply(lambda x: 1 if x=='Female' else 0)
+    
+    #For matching purposes
+    if gender != None :
+        df = df.loc[(df['Gender'] == gender)]
+    if age != None :
+        df = df.loc[(df['Age'] <= age[1]) & (df['Age'] >= age[0])]
+    if undersample !=None :
+        dfd = df.loc[(df['ds'] == ('Depressive')) | (df['ds'] == 1)]
+        dfnd= df.loc[(df['ds'] == ('Not depressive')) | (df['ds'] == 0)]
+        df = df.sample(frac=1).reset_index(drop=True)
+
+    #Analyzes for absurd values. Imputation possible. Lots of calculations.
     copy = df.copy()
     
     if normalization:
@@ -466,7 +535,10 @@ def data_preprocessing(name='test', s_filter=ds_2CAT,
             
     assert copy.keys().all()==df.keys().all(), \
         "Label added or substracted in spite of Arg "
-        
+    
+
+    
+    print(df.shape[0],' patients will be used.')
     return df.drop(drop,axis=1)
 
 
@@ -475,13 +547,14 @@ def data_preprocessing(name='test', s_filter=ds_2CAT,
 #Creates the evaluation function, shapes the datas and creates + trains the model
 
 
-def Pipeline_maker(df, name='test', scorer=f1_scorer,  
-                   pop = 500, gen = 10, th = 19,save=True, target='ds'):
+def Pipeline_maker(df, name='test', scorer=f1_scorer, classification=True,
+                   pop = 500, gen = 10, th = 19,save=True, target='ds',
+                   greater_is_better=True, config_dict=None, rand = 23):
     
-    score_pipe=make_scorer(scorer)
-
-    #print(df.shape)
-    model = train_tpot(df, gen, pop, name, score_pipe, save, target=target)
+    score_pipe=make_scorer(scorer, greater_is_better=greater_is_better)
+    
+    model = train_tpot(df, gen, pop, name, score_pipe, save, target=target,
+                       classification=classification,config_dict=config_dict, rand=rand)
     
     return model
 
@@ -492,25 +565,26 @@ def Pipeline_maker(df, name='test', scorer=f1_scorer,
 
 def Pipeline_eval (name='test', scorer=f1_scorer,
                    model=None, df= None,
-                   save=True, verbosity=1, target='ds'):
-    
-    if save :
-        with open((name+'.cfg'), 'rb') as pickle_file:
-            dic=pickle.load(pickle_file)    
+                   save=True, verbosity=1, target='ds', 
+                   classification = True, return_algorythms=False, cv=3):
+    if classification :
+#        if save :
+#            with open((name+'.cfg'), 'rb') as pickle_file:
+#                dic=pickle.load(pickle_file)    
+#                if verbosity >0:
+#                    print("Real test : ")
+#                Pred = model.predict(dic['X_test'])
+#                r1 = score(dic['y_test'],Pred, verbosity =verbosity )
+#                r1['score']=scorer(dic['y_test'],Pred)
+#        else :
+#            r1 = None
+#    
         if verbosity >0:
-            print("Real test : ")
-        Pred = model.predict(dic['X_test'])
-        r1 = score(dic['y_test'],Pred, verbosity =verbosity )
-        r1['score']=scorer(dic['y_test'],Pred)
-    else :
-        r1 = None
+            print(" Reroll : ")
+        r2 = score_model(df, model, cv=cv, target=target, verbosity=verbosity, scorer=scorer,return_algorythms=return_algorythms)
     
-    if verbosity >0:
-        print(" Reroll : ")
-    r2 = score_model(df, model, target=target, verbosity=verbosity)
-    
-
-    return {'r1': r1,'r2':r2}
+        if not(return_algorythms): return {'r2':r2}
+        else : return {'r2':r2[0]},r2[1] 
 
 #------------------------------
 # Matplotlib graph generating functions
@@ -560,22 +634,11 @@ def pipeline_retest_results_display(results, name, filename = None,
     plt.xticks(rotation=-45)
     plt.show()
 
-
-
 #------------------------------
 
-def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer, 
-                   drop=['ID','SCOREBDI', 'Gender','Age'], data_choice = 'cv', 
-                   pop = 500, gen = 10, th = 19,save=True, display=True, 
-                   c_display=1,
-                   save_d= True,
-                   target='ds',
-                   norm= False,
-                   clean=False,
-                   factor = 3, dynamic_drop=False, ban_thresh = 10):
-    
+def assign_filename (name, save):
+    file_name=name
     if save :
-    
         file_name = './'+ name+'/'+name    
         if not os.path.exists(name):
             os.makedirs(name)
@@ -589,37 +652,54 @@ def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer,
 
             os.makedirs((name+' '+file_id))
             file_name = './'+ name+' '+file_id+'/'+name
+    return file_name
     
+
+#------------------------------
+
+def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer, 
+                   drop=['ID','SCOREBDI'], data_choice = 'cv', 
+                   pop = 500, gen = 10, th = 19,save=True, display=True, 
+                   classification=True, greater_is_better=True,config_dict=None,
+                   c_display=1, gender = None, age = None,
+                   save_d= True,
+                   target='ds',
+                   norm= False,
+                   clean=False,
+                   factor = 3, dynamic_drop=False, ban_thresh = 10, rand = 23, cv = 3):
+    z = locals()
+    file_name = assign_filename (name, save)
     
     df = data_preprocessing(name=file_name, s_filter=s_filter, 
                             drop=drop, data_choice = data_choice, 
                             normalization=norm ,clean= clean, th=th,
                             factor = factor, dynamic_drop=dynamic_drop,
-                            ban_thresh = ban_thresh)
+                            ban_thresh = ban_thresh, gender = gender, age =age )
     
     #Contains the final data_set, ultimately provided to the pipeline making 
-    #progress
+    #process
     
-    df.to_csv(file_name + ' post preprocessing.csv', index = False)
+    df.to_csv(path_or_buf=(file_name + ' post preprocessing.csv'), index = False)
     
     model = Pipeline_maker (df, name=file_name, scorer=scorer, 
                             pop = pop, gen = gen, th = th,save=save, 
-                            target = target)
+                            classification=classification,target = target,
+                            greater_is_better=greater_is_better, config_dict=config_dict, rand=rand)
     
-    results = Pipeline_eval(name=file_name, model=model, target = target, 
-                            df=df, save=save, 
-                            verbosity = c_display,scorer=scorer)
+    results = Pipeline_eval(name=file_name, model=clone(model), target = target, 
+                            df=df, save=save, classification=classification,
+                            verbosity = c_display,scorer=scorer,cv=cv)
     
-    if display :
-        pipeline_results_display(results['r1'], name, filename=file_name, 
-                                 save_d=save_d, scorer=scorer)
+    if (display and classification) :
+#        pipeline_results_display(results['r1'], name, filename=file_name, 
+#                                 save_d=save_d, scorer=scorer)
         
         pipeline_retest_results_display(results['r2'], name, 
                                 filename=file_name, 
                                 save_d=save_d, scorer=scorer)
 
     
-    return results
+    return results,model
 
 
 #---------------------------
