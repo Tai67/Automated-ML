@@ -17,20 +17,20 @@ import seaborn as sns
 
 from tpot import TPOTClassifier
 from tpot import TPOTRegressor
-from pandas import ExcelWriter
 
-
-from pandas.util.testing import assert_frame_equal
 from sklearn.metrics import f1_score
 from sklearn.metrics import make_scorer
 from sklearn.metrics import cohen_kappa_score
 from sklearn.metrics import roc_auc_score
 
+from sklearn.utils import shuffle
 from sklearn.base import clone
 
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import KFold
+from numpy.random import seed
 
+from pandas.util.testing import assert_frame_equal
 # Bunch of filter functions
 
 def ds_2CAT (x, threshhold=19):
@@ -92,7 +92,6 @@ def d_only_b ( x, threshhold = 19 ):
 
 #----------------------------------
       
-#/!\ BETA !
 # Gets some absurd values out of the batch, corrects them with normalized 
 # values              
 
@@ -319,26 +318,221 @@ def kappa(Y_test, Y_pred, mean_type='macro'):
 # Returns cv, ct or both combined in one csv
     
 # data_choice = 'cv', 'ct' or 'both'
-    
+
 def load_data(data_choice = 'cv' ):
 
     data_file_1 = "1000BRAINS_BDI_Score_Vol.csv"
     data_file_2 = "1000BRAINS_BDI_Score_CT.csv"
-#    data_file_3 = "
+    
+    data_file_31 = "aparc_stats_T1_lh_vol_eNKI.csv"
+    data_file_32 = "aparc_stats_T1_rh_vol_eNKI.csv"
+    
+    data_file_41 = "aparc_stats_T1_lh_eNKI.csv"
+    data_file_42 = "aparc_stats_T1_rh_eNKI.csv"
+    
+    data_file_51 = "BDI_1.csv"
+    data_file_52 = "BDI_2.csv"
     df= None
     
     if data_choice == 'cv':
-        df = pd.read_csv(data_file_1,sep=';').dropna()
-    elif data_choice == 'ct':
-#        df = pd.read_csv(data_file_2,sep=';').applymap(\
-#                lambda x: np.nan if x=='#N/D' else x )
-#                
-        df = pd.read_csv(data_file_2,sep=',').dropna()
+        df = pd.read_csv(data_file_1,sep=';',index_col =0).dropna(axis = 0, how='any')
+    elif data_choice == 'ct':         
+        df = pd.read_csv(data_file_2,sep=',',index_col =0).dropna(axis = 0, how='any')
         
     elif data_choice == 'both' :
-        df1 = pd.read_csv(data_file_1,sep=';').dropna()
-        df2 = pd.read_csv(data_file_2,sep=',').dropna()
-        df = pd.merge(df1,df2)
+        df1 = pd.read_csv(data_file_1,sep=';',  index_col =0)
+        df2 = pd.read_csv(data_file_2,sep=',',  index_col =0).drop(['Gender','Age','SCOREBDI'], axis=1)
+        df = pd.concat([df1, df2], axis=1)
+#        print(df.index)
+#        df.to_csv(path_or_buf="check.csv", index=False)
+        
+    
+        
+        
+    elif data_choice == 'rl_cv':
+        
+        df1 = pd.read_csv(data_file_31,sep=',',index_col=False ).dropna()
+
+        df1['ID']=df1['lh.aparc.volume'].apply(lambda x:  (x[4:13]))
+        df1= df1.drop(['lh.aparc.volume','BrainSegVolNotVent','eTIV'],\
+                      axis = 1).set_index('ID')
+        
+        df2 = pd.read_csv(data_file_32,sep=',',index_col=False ).dropna()
+        
+        df2['ID']=df2['rh.aparc.volume'].apply(lambda x:  (x[4:13]))
+        df2= df2.drop(['rh.aparc.volume','BrainSegVolNotVent','eTIV'],\
+                        axis = 1).set_index('ID')
+        df = pd.concat([df1, df2], axis=1)
+        
+        attributes = pd.read_csv(data_file_51,sep=',',index_col=False ).dropna()
+        attributes['ID']=attributes['Anonymized ID']
+        attributes= attributes.drop(['Subject Type','Anonymized ID','Visit','R','Native language','Ethnicity'],\
+                        axis = 1).set_index('ID')
+        
+        targ = pd.read_csv(data_file_52,sep=',',index_col=False ).dropna()
+        targ['ID']=targ['Anonymized ID']
+        targ = targ.set_index('ID')
+        targ=targ['BDI Total']
+        
+        ids, df_ids, attributes_ids=[], [], []
+        #First : Creating a double-free ID list of df
+        for a in (set(df.index)-set(doubles(df.index))):
+                df_ids.append(a)
+        #Taking out doubles from : Creating a double-free ID list of df
+        for a in (set(attributes.index)-set(doubles(attributes.index))):
+                attributes_ids.append(a)
+        # Removing all doubles from the selection
+        # Reason : Doubles can't be associated with the BDI
+        for a in (set(targ.index)-set(doubles(targ.index))):
+            if (a in df_ids) & (a in attributes_ids):
+                ids.append(a)
+        
+
+        #Checking for an unseen double (unlikely)
+        assert len(ids) == len(set(ids))
+        
+        final_df = dict()
+        final_attributes= dict()
+        final_targets = dict()
+        
+        for ind in ids :
+#           In case the patient has multiple datas available, raise error
+            if type(df.loc[ind])== type(pd.DataFrame()):
+                raise 'Multiple datas for one ID'
+            else :
+                final_df[ind] = (df.loc[ind])
+                
+        for ind in ids :
+#           In case the patient has multiple datas available, only the first one is selected
+            if type(attributes.loc[ind])== type(pd.DataFrame()):
+                raise 'Multiple attributes for one ID'
+            else :
+                final_attributes[ind] = (attributes.loc[ind])
+                
+        for ind in ids :
+#           In case the patient has multiple attributes available, raise error
+            if type(targ.loc[ind])== type(pd.DataFrame()):
+                raise 'Multiple targets for one ID'
+            else :
+                final_targets[ind] = (targ.loc[ind])
+#        
+        final_df=pd.DataFrame(final_df).transpose()
+        final_attributes=pd.DataFrame(final_attributes).transpose()
+        final_targets=pd.Series(final_targets)
+        
+        #Making sure there are only int type value in the BDI
+        for val in final_targets:
+            try :
+                int(val)
+            except ValueError:
+                final_targets = final_targets.drop( \
+                    final_targets.loc[final_targets==val].index, axis =0)
+
+                
+        print(final_targets.shape)
+        #If you feel like checking anything...        
+#        final_df.to_csv('First results df.csv')
+#        final_attributes.to_csv('First results Att.csv')
+#        final_targets.to_csv('First results target.csv')        
+        
+        result = pd.concat([final_df,final_attributes], axis=1)
+        result['BDI']=final_targets
+        df = result
+#        return df1, df2, df, attributes, targ, ids, final_df, final_attributes, final_targets
+    
+    elif data_choice == 'rl_ct':
+        
+        df1 = pd.read_csv(data_file_41,sep=',',index_col=False ).dropna()
+
+        df1['ID']=df1['lh.aparc.thickness'].apply(lambda x:  (x[4:13]))
+        df1= df1.drop(['lh.aparc.thickness','BrainSegVolNotVent','eTIV',\
+                       'lh_MeanThickness_thickness'],\
+                      axis = 1).set_index('ID')
+        
+        df2 = pd.read_csv(data_file_42,sep=',',index_col=False ).dropna()
+        
+        df2['ID']=df2['rh.aparc.thickness'].apply(lambda x:  (x[4:13]))
+        df2= df2.drop(['rh.aparc.thickness','BrainSegVolNotVent','eTIV',\
+                       'rh_MeanThickness_thickness'],\
+                        axis = 1).set_index('ID')
+        df = pd.concat([df1, df2], axis=1)
+        
+        attributes = pd.read_csv(data_file_51,sep=',',index_col=False ).dropna()
+        attributes['ID']=attributes['Anonymized ID']
+        attributes= attributes.drop(['Subject Type','Anonymized ID','Visit','R','Native language','Ethnicity'],\
+                        axis = 1).set_index('ID')
+        
+        targ = pd.read_csv(data_file_52,sep=',',index_col=False ).dropna()
+        targ['ID']=targ['Anonymized ID']
+        targ = targ.set_index('ID')
+        targ=targ['BDI Total']
+        
+        ids, df_ids, attributes_ids=[], [], []
+        #First : Creating a double-free ID list of df
+        for a in (set(df.index)-set(doubles(df.index))):
+                df_ids.append(a)
+        #Taking out doubles from : Creating a double-free ID list of df
+        for a in (set(attributes.index)-set(doubles(attributes.index))):
+                attributes_ids.append(a)
+        # Removing all doubles from the selection
+        # Reason : Doubles can't be associated with the BDI
+        for a in (set(targ.index)-set(doubles(targ.index))):
+            if (a in df_ids) & (a in attributes_ids):
+                ids.append(a)
+        
+
+        #Checking for an unseen double (unlikely)
+        assert len(ids) == len(set(ids))
+        
+        final_df = dict()
+        final_attributes= dict()
+        final_targets = dict()
+        
+        for ind in ids :
+#           In case the patient has multiple datas available, raise error
+            if type(df.loc[ind])== type(pd.DataFrame()):
+                raise 'Multiple datas for one ID'
+            else :
+                final_df[ind] = (df.loc[ind])
+                
+        for ind in ids :
+#           In case the patient has multiple datas available, only the first one is selected
+            if type(attributes.loc[ind])== type(pd.DataFrame()):
+                raise 'Multiple attributes for one ID'
+            else :
+                final_attributes[ind] = (attributes.loc[ind])
+                
+        for ind in ids :
+#           In case the patient has multiple attributes available, raise error
+            if type(targ.loc[ind])== type(pd.DataFrame()):
+                raise 'Multiple targets for one ID'
+            else :
+                final_targets[ind] = (targ.loc[ind])
+#        
+        final_df=pd.DataFrame(final_df).transpose()
+        final_attributes=pd.DataFrame(final_attributes).transpose()
+        final_targets=pd.Series(final_targets)
+        
+        #Making sure there are only int type value in the BDI
+        for val in final_targets:
+            try :
+                int(val)
+            except ValueError:
+                final_targets = final_targets.drop( \
+                    final_targets.loc[final_targets==val].index, axis =0)
+
+                
+        print(final_targets.shape)
+        #If you feel like checking anything...        
+#        final_df.to_csv('First results df.csv')
+#        final_attributes.to_csv('First results Att.csv')
+#        final_targets.to_csv('First results target.csv')        
+        
+        result = pd.concat([final_df,final_attributes], axis=1)
+        result['BDI']=final_targets
+        df=  result
+        print('lol')
+        
     else :
         raise
         
@@ -360,7 +554,10 @@ def train_tpot(df, gen, pop, name, scorer, save = True,
     if save :    
         features.to_csv(path_or_buf=(name + ' features.csv'), index = False)
         target.to_csv(path=(name + ' targets.csv'), index = False)
-        
+
+#    features = features.values  #Making sure the index names have no influence
+#    target = target.values
+
 #    X_train, X_test, y_train, y_test = train_test_split(
 #            features,target,
 #            train_size=0.75, test_size=0.25)
@@ -381,9 +578,9 @@ def train_tpot(df, gen, pop, name, scorer, save = True,
     if save :
         
                 
-        t_pot.export((name+'.py'))
+        t_pot.export((name+'model.py'))
         
-        with open((name+'.cfg'), 'wb') as pickle_file:
+        with open((name+'pickled.cfg'), 'wb') as pickle_file:
             pickle.dump({'df': df, 'gen' : gen, 'pop': pop, 'name':name, 
                          'function' : scorer,'X_test':features,
                          'y_test':target, 'model':x }, 
@@ -511,14 +708,21 @@ def data_preprocessing(name='test', s_filter=ds_2CAT,
         df['Gender']= df.Gender.apply(lambda x: 1 if x=='Female' else 0)
     
     #For matching purposes
-    if gender != None :
+    if gender   != None :
         df = df.loc[(df['Gender'] == gender)]
-    if age != None :
-        df = df.loc[(df['Age'] <= age[1]) & (df['Age'] >= age[0])]
+    if age      != None :
+        df = df.loc[(df['Age'] < age[1]) & (df['Age'] >= age[0])]
     if undersample !=None :
+        assert type(undersample) ==int, "Undersample should be an integer"
+        
         dfd = df.loc[(df['ds'] == ('Depressive')) | (df['ds'] == 1)]
+#        print(dfd.shape)
         dfnd= df.loc[(df['ds'] == ('Not depressive')) | (df['ds'] == 0)]
-        df = df.sample(frac=1).reset_index(drop=True)
+        dfnd = dfnd.sample(n=(undersample*dfd.shape[0]), random_state=rand)
+#                .reset_index(drop=True)
+#        print(dfd.index)
+        df = pd.concat([dfd, dfnd])
+        df = df = shuffle(df)
 
     #Analyzes for absurd values. Imputation possible. Lots of calculations.
     copy = df.copy()
@@ -539,6 +743,11 @@ def data_preprocessing(name='test', s_filter=ds_2CAT,
 
     
     print(df.shape[0],' patients will be used.')
+    try :
+        print(df.loc[((df['ds'] == 1) | (df['ds'] == 'Depressive'))].shape[0],\
+                 'depressive patients will be used.')
+    except : 
+        pass
     return df.drop(drop,axis=1)
 
 
@@ -566,7 +775,7 @@ def Pipeline_maker(df, name='test', scorer=f1_scorer, classification=True,
 def Pipeline_eval (name='test', scorer=f1_scorer,
                    model=None, df= None,
                    save=True, verbosity=1, target='ds', 
-                   classification = True, return_algorythms=False, cv=3):
+                   classification = True, return_algorythms=False, cv=3, rand = 23):
     if classification :
 #        if save :
 #            with open((name+'.cfg'), 'rb') as pickle_file:
@@ -578,7 +787,7 @@ def Pipeline_eval (name='test', scorer=f1_scorer,
 #                r1['score']=scorer(dic['y_test'],Pred)
 #        else :
 #            r1 = None
-#    
+        np.random.seed(rand)
         if verbosity >0:
             print(" Reroll : ")
         r2 = score_model(df, model, cv=cv, target=target, verbosity=verbosity, scorer=scorer,return_algorythms=return_algorythms)
@@ -626,11 +835,11 @@ def pipeline_retest_results_display(results, name, filename = None,
     plt.xlabel('Type of score', fontsize=24)
     plt.ylabel('Score', fontsize=24)
     plt.legend
-    plt.title(name+' retest')
+    plt.title(name+' cross validation results')
 
     if save_d:
         assert filename!=None
-        plt.savefig((filename+'retest .png'))
+        plt.savefig((filename+'Graph .png'))
     plt.xticks(rotation=-45)
     plt.show()
 
@@ -639,7 +848,7 @@ def pipeline_retest_results_display(results, name, filename = None,
 def assign_filename (name, save):
     file_name=name
     if save :
-        file_name = './'+ name+'/'+name    
+        file_name = './'+ name+'/'   
         if not os.path.exists(name):
             os.makedirs(name)
             
@@ -651,10 +860,22 @@ def assign_filename (name, save):
             file_id = file_id[:-7]
 
             os.makedirs((name+' '+file_id))
-            file_name = './'+ name+' '+file_id+'/'+name
+            file_name = './'+ name+' '+file_id+'/'
     return file_name
     
 
+def make_an_excel (name, dir_path):
+
+    writer = pd.ExcelWriter((dir_path+name+'.xlsx'))
+    
+    for filename in os.listdir(dir_path):
+#        print(filename)
+        if filename.endswith(".csv") : 
+#            print('check 2')
+#            print(filename)
+            t = pd.read_csv((dir_path+filename))
+            t.to_excel(writer, sheet_name = filename[:-4], index=False)
+    writer.save()
 #------------------------------
 
 def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer, 
@@ -666,20 +887,25 @@ def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer,
                    target='ds',
                    norm= False,
                    clean=False,
-                   factor = 3, dynamic_drop=False, ban_thresh = 10, rand = 23, cv = 3):
+                   factor = 3, dynamic_drop=False, ban_thresh = 10, rand = 23, 
+                   cv = 3, undersample = None):
+    
     z = locals()
+    seed(rand)
     file_name = assign_filename (name, save)
+    pd.Series(z).to_csv(path=(file_name+' experiment variables.csv'))
     
     df = data_preprocessing(name=file_name, s_filter=s_filter, 
                             drop=drop, data_choice = data_choice, 
                             normalization=norm ,clean= clean, th=th,
                             factor = factor, dynamic_drop=dynamic_drop,
-                            ban_thresh = ban_thresh, gender = gender, age =age )
+                            ban_thresh = ban_thresh, gender = gender, age =age,
+                            undersample = undersample)
     
     #Contains the final data_set, ultimately provided to the pipeline making 
     #process
     
-    df.to_csv(path_or_buf=(file_name + ' post preprocessing.csv'), index = False)
+    df.to_csv(path_or_buf=(file_name + ' post preprocessing.csv'))
     
     model = Pipeline_maker (df, name=file_name, scorer=scorer, 
                             pop = pop, gen = gen, th = th,save=save, 
@@ -698,7 +924,7 @@ def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer,
                                 filename=file_name, 
                                 save_d=save_d, scorer=scorer)
 
-    
+    if save : make_an_excel(name, file_name)
     return results,model
 
 
