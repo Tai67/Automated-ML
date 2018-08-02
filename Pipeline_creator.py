@@ -6,22 +6,32 @@ Created on Sat Apr 28 19:34:04 2018
 """
 
 # Pipeline-creation set
-import tpot
+import tpot 
 import os
 import datetime
 import numpy as np
 import pandas as pd
 import pickle
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 from tpot import TPOTClassifier
+from tpot import TPOTRegressor
 
-from pandas.util.testing import assert_frame_equal
 from sklearn.metrics import f1_score
 from sklearn.metrics import make_scorer
+from sklearn.metrics import cohen_kappa_score
+from sklearn.metrics import roc_auc_score
+
+from sklearn.utils import shuffle
+from sklearn.base import clone
+
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import KFold
+from numpy.random import seed
 
-# Bunch of filter functions to diagnose between patients
+from pandas.util.testing import assert_frame_equal
+# Bunch of filter functions
 
 def ds_2CAT (x, threshhold=19):
     if x < threshhold :
@@ -43,9 +53,9 @@ def ds_4CAT (x, threshhold = [10, 19, 29]):
     else :
         return "severe"
 
-
 def ds_cs ( x, threshhold = 19 ):
     #Gets minimal and mild patients off the batch
+    #Lets undersample
     if x == 0:
         return 'Not depressive'
     elif x > threshhold :
@@ -57,9 +67,15 @@ def ds_cs ( x, threshhold = 19 ):
 #----------------------------------
 
 #Filter functions for binary classification
-   
+
+def ds_2CAT_b (x, threshhold=19):
+    if x < threshhold :
+        return 0
+    else :
+        return 1
+
 def ds_cs_b ( x, threshhold = 19 ):
-    #Gets minimal and mild patients off the batch, binary output
+    #Gets minimal and mild patients off the batch
     #Lets undersample
     if x == 0:
         return 0
@@ -67,13 +83,20 @@ def ds_cs_b ( x, threshhold = 19 ):
         return 1
     else :
         return np.nan
+    
+def d_only_b ( x, threshhold = 19 ):
+    
+    if x>= 19   :  return 1
+    else        :  return np.nan
+
 
 #----------------------------------
       
-# Marks absurd values, can corrects them with normalized ones ( unused )
+# Gets some absurd values out of the batch, corrects them with normalized 
+# values              
 
 def repartition (df, marks,name='test') :
-    # Used to analyze which features have highly divergent values
+    # Used to analyze which brain's region are affected by modifications
     x,i = pd.DataFrame(columns=df.keys()), 0
     #print(marks)
     for val_id_list in marks :
@@ -87,24 +110,24 @@ def repartition (df, marks,name='test') :
         x.loc[i] = row.copy()
         i+=1    
     # Exports the analyzes to csv 
-    x.to_csv(path_or_buf=name + "repartition.csv")
-    x.sum().to_csv(path=name + "sommes.csv")
+    x.to_csv(path_or_buf=(name + " repartition.csv"))
+    x.sum().to_frame().to_csv(path_or_buf=(name + " sommes.csv"))
     
     
-    return x.sum() #How much DV per features in a pd.Series
+    return x.sum()
 
 
 def mark_and_normalize(df, drop_a,
                        verbosity = 1, 
                        name=None, factor=3): 
-    # Marks divergent values / Patient
+    
     datas= df.drop(drop_a,axis=1).copy()
     marks= []
     av_size=[]
 
-    #Mean patients value  
-    av_size = datas.mean(axis=0)
-            
+    #Median patients value  
+    av_size = datas.median(axis=0)
+         
     u_a_l_born= {} # Dictionnaire de valeurs relatives aux keys
     for key in datas :
         median = datas[key].median()
@@ -120,7 +143,7 @@ def mark_and_normalize(df, drop_a,
     # Scans the datas for extreme values
     # These Values are, for each patient, appended to "marks" (list of lists)
     # Marks is sent to "Repartition" for analyses
-    # A new value is calculated for the abnormal value 
+    # A new value is calculated for the abnormal value ( if clean = TRUE)
     # After the median value of the data and the median value of the patient's
     # data (~)
     # This values are then put into df
@@ -134,10 +157,9 @@ def mark_and_normalize(df, drop_a,
         
         for keys in x[1].keys() :
             
-            if (not(u_a_l_born[keys]['down']<    #if value is not in an interval
+            if (not(u_a_l_born[keys]['down']<  #if value is not in an interval
                    x[1][keys]< 
-                   u_a_l_born[keys]['up'])) \
-            or int(x[1][keys])<5:
+                   u_a_l_born[keys]['up'])) :   # Or simply way too low 
                 
                 if verbosity >= 2 :
                     print(u_a_l_born[keys]['down'],' < ' ,
@@ -162,19 +184,19 @@ def mark_and_normalize(df, drop_a,
     mask = repartition(datas, marks, name) 
     # Produces some Data analyses - no effect 
     # Number of abnormal value per region    
-    
             
     if verbosity>0 :
         
         print("Total values :", datas.shape[0]*datas.shape[1])
-        print("Corrections : ", correction)
+        print("Corrected values : ", correction, " - ", \
+              correction*100/(datas.shape[0]*datas.shape[1]),"%")
         print("Marked Patients : ", nr_w_datas)
      
     #Keeps track
-    df.to_csv(path_or_buf=name +"Original.csv", index=False)
+    df.to_csv(path_or_buf=(name +" original.csv"), index=False)
     for keys in datas.keys() :
         df[keys] = datas[keys].copy()
-    datas.to_csv(path_or_buf=name + "Correct.csv", index=False)
+    datas.to_csv(path_or_buf=(name + " correct.csv"), index=False)
 
     # Calculates and displays how much area's are having abnorm values
     s = []
@@ -189,8 +211,8 @@ def mark_and_normalize(df, drop_a,
 
 
 def analyse_and_clean(df,drop_a=['ID','SCOREBDI', 'Gender','ds','Age'],
-                      name = None, clean=False, verbosity = 1, factor = 3,
-                      dynamic_drop=False):    
+                      name = None, clean=False, verbosity = 1, 
+                      factor = 3, dynamic_drop=False, ban_thresh = 10):    
     #if clean = true : Gets questionnable patients data out + analyzis
     # Clean = False : Returns original DB with analysis
     
@@ -204,18 +226,18 @@ def analyse_and_clean(df,drop_a=['ID','SCOREBDI', 'Gender','ds','Age'],
     
     if name!=None :
         
-        datas.to_csv(path_or_buf=name+"abnormal patient datas.csv", 
+        datas.to_csv(path_or_buf=(name+" abnormal patient datas.csv"), 
                      index=False)
     if clean :
         # Signalize a modification of the Dataset ( experimental )
-        print("Normalized")
+        print("Imputated")
         copy = datas.drop('marks', axis=1).copy()
     
     if dynamic_drop :
         new_drop = []
         print(mask)
         for key in mask.keys():
-            if mask[key] != 0:
+            if mask[key] >= ban_thresh :
                 new_drop.append(key)
         copy = copy.drop(new_drop,axis=1).copy()
         # Proceeded to anaylze - no modification
@@ -225,15 +247,13 @@ def analyse_and_clean(df,drop_a=['ID','SCOREBDI', 'Gender','ds','Age'],
 #----------------------------------
 
 def categorized(df, s_filter = ds_2CAT, th =19):
-    # Returns the final processed Dataframe
+    # Returns a preprocessed Dataframe with target score
     
     result = df.copy()
     result['ds'] = df.SCOREBDI.apply(s_filter, threshhold=th)
     
-    if s_filter == ds_cs :
-        return result.dropna()
-    
-    return result
+    return result.dropna()
+
 
 #----------------------------------        
 # Bunch of evaluating functions
@@ -246,9 +266,9 @@ def sens_spec_score(Y_test, Y_pred):
     Y_pred=Y_pred.tolist()
     zipped=zip(Y_test,Y_pred)
     n_dep,  pp_diag,n_ndep, np_diag = (0,0,0,0)
-
+    
     for x in list (zipped):
-
+        
         if x[0] == 'Depressive':
             n_dep+=1
         else :
@@ -258,48 +278,264 @@ def sens_spec_score(Y_test, Y_pred):
             pp_diag +=1
         elif x[0]==x[1] and x[1]=='Not depressive':
             np_diag +=1
-
+            
     if n_dep!=0 :
         Sensitivity = np.float64(pp_diag/n_dep)
     else :
         Sensitivity = 0
-
+        
     if n_ndep!= 0 :    
         Specificity = np.float64(np_diag/n_ndep)
     else :
-        Specificity = 0    
+        Specificity = 0
+        
     return np.float64(((Sensitivity * Specificity)*2)/
                        (Sensitivity + Specificity))
 
-  
+def roc_auc_scorer(Y_test, Y_pred, average = 'macro'):
+    return roc_auc_score(Y_test, Y_pred,average = 'macro')
+
+
 def f1_scorer(Y_test, Y_pred, mean_type='macro'):
     #Return f1_score, without balancing between classes
     return f1_score(Y_test,Y_pred,average = mean_type )
+
+def kappa(Y_test, Y_pred, mean_type='macro'):
+    #Returns cohen kappa score between classes
+    Y_test=[1 if x=='Depressive' else 0 for x in Y_test]
+    Y_pred=[1 if x=='Depressive' else 0 for x in Y_pred]
+    return cohen_kappa_score(Y_test,Y_pred)
+
+#def s_kappa(Y_test, Y_pred, mean_type='macro',weights='quadratic'):
+#    #Returns cohen kappa score between classes
+#    return cohen_kappa_score(Y_test,Y_pred,weights=weights )
+
+
+
 
 #----------------------------------
 
 # Returns cv, ct or both combined in one csv
     
 # data_choice = 'cv', 'ct' or 'both'
-    
+
 def load_data(data_choice = 'cv' ):
 
-    data_file_1 = "1000BRAINS_BDI_Score_CT.csv"
-    data_file_2 = "1000BRAINS_BDI_Score_Vol.csv"
+    data_file_1 = "1000BRAINS_BDI_Score_Vol.csv"
+    data_file_2 = "1000BRAINS_BDI_Score_CT.csv"
+    
+    data_file_31 = "aparc_stats_T1_lh_vol_eNKI.csv"
+    data_file_32 = "aparc_stats_T1_rh_vol_eNKI.csv"
+    
+    data_file_41 = "aparc_stats_T1_lh_eNKI.csv"
+    data_file_42 = "aparc_stats_T1_rh_eNKI.csv"
+    
+    data_file_51 = "BDI_1.csv"
+    data_file_52 = "BDI_2.csv"
     df= None
     
     if data_choice == 'cv':
-        df = pd.read_csv(data_file_1,sep=',').dropna()
-    elif data_choice == 'ct':
-        df = pd.read_csv(data_file_2,sep=';').dropna()
+        df = pd.read_csv(data_file_1,sep=';',index_col =0).dropna(axis = 0, how='any')
+    elif data_choice == 'ct':         
+        df = pd.read_csv(data_file_2,sep=',',index_col =0).dropna(axis = 0, how='any')
         
     elif data_choice == 'both' :
-        df1 = pd.read_csv(data_file_1,sep=',').dropna()
-        df2 = pd.read_csv(data_file_2,sep=';').dropna()
-        df = pd.merge(df1,df2)
+        df1 = pd.read_csv(data_file_1,sep=';',  index_col =0)
+        df2 = pd.read_csv(data_file_2,sep=',',  index_col =0).drop(['Gender','Age','SCOREBDI'], axis=1)
+        df = pd.concat([df1, df2], axis=1)
+#        print(df.index)
+#        df.to_csv(path_or_buf="check.csv", index=False)
+        
+    
+        
+        
+    elif data_choice == 'rl_cv':
+        
+        df1 = pd.read_csv(data_file_31,sep=',',index_col=False ).dropna()
+
+        df1['ID']=df1['lh.aparc.volume'].apply(lambda x:  (x[4:13]))
+        df1= df1.drop(['lh.aparc.volume','BrainSegVolNotVent','eTIV'],\
+                      axis = 1).set_index('ID')
+        
+        df2 = pd.read_csv(data_file_32,sep=',',index_col=False ).dropna()
+        
+        df2['ID']=df2['rh.aparc.volume'].apply(lambda x:  (x[4:13]))
+        df2= df2.drop(['rh.aparc.volume','BrainSegVolNotVent','eTIV'],\
+                        axis = 1).set_index('ID')
+        df = pd.concat([df1, df2], axis=1)
+        
+        attributes = pd.read_csv(data_file_51,sep=',',index_col=False ).dropna()
+        attributes['ID']=attributes['Anonymized ID']
+        attributes= attributes.drop(['Subject Type','Anonymized ID','Visit','R','Native language','Ethnicity'],\
+                        axis = 1).set_index('ID')
+        
+        targ = pd.read_csv(data_file_52,sep=',',index_col=False ).dropna()
+        targ['ID']=targ['Anonymized ID']
+        targ = targ.set_index('ID')
+        targ=targ['BDI Total']
+        
+        ids, df_ids, attributes_ids=[], [], []
+        #First : Creating a double-free ID list of df
+        for a in (set(df.index)-set(doubles(df.index))):
+                df_ids.append(a)
+        #Taking out doubles from : Creating a double-free ID list of df
+        for a in (set(attributes.index)-set(doubles(attributes.index))):
+                attributes_ids.append(a)
+        # Removing all doubles from the selection
+        # Reason : Doubles can't be associated with the BDI
+        for a in (set(targ.index)-set(doubles(targ.index))):
+            if (a in df_ids) & (a in attributes_ids):
+                ids.append(a)
+        
+
+        #Checking for an unseen double (unlikely)
+        assert len(ids) == len(set(ids))
+        
+        final_df = dict()
+        final_attributes= dict()
+        final_targets = dict()
+        
+        for ind in ids :
+#           In case the patient has multiple datas available, raise error
+            if type(df.loc[ind])== type(pd.DataFrame()):
+                raise 'Multiple datas for one ID'
+            else :
+                final_df[ind] = (df.loc[ind])
+                
+        for ind in ids :
+#           In case the patient has multiple datas available, only the first one is selected
+            if type(attributes.loc[ind])== type(pd.DataFrame()):
+                raise 'Multiple attributes for one ID'
+            else :
+                final_attributes[ind] = (attributes.loc[ind])
+                
+        for ind in ids :
+#           In case the patient has multiple attributes available, raise error
+            if type(targ.loc[ind])== type(pd.DataFrame()):
+                raise 'Multiple targets for one ID'
+            else :
+                final_targets[ind] = (targ.loc[ind])
+#        
+        final_df=pd.DataFrame(final_df).transpose()
+        final_attributes=pd.DataFrame(final_attributes).transpose()
+        final_targets=pd.Series(final_targets)
+        
+        #Making sure there are only int type value in the BDI
+        for val in final_targets:
+            try :
+                int(val)
+            except ValueError:
+                final_targets = final_targets.drop( \
+                    final_targets.loc[final_targets==val].index, axis =0)
+
+                
+        print(final_targets.shape)
+        #If you feel like checking anything...        
+#        final_df.to_csv('First results df.csv')
+#        final_attributes.to_csv('First results Att.csv')
+#        final_targets.to_csv('First results target.csv')        
+        
+        result = pd.concat([final_df,final_attributes], axis=1)
+        result['BDI']=final_targets
+        df = result
+#        return df1, df2, df, attributes, targ, ids, final_df, final_attributes, final_targets
+    
+    elif data_choice == 'rl_ct':
+        
+        df1 = pd.read_csv(data_file_41,sep=',',index_col=False ).dropna()
+
+        df1['ID']=df1['lh.aparc.thickness'].apply(lambda x:  (x[4:13]))
+        df1= df1.drop(['lh.aparc.thickness','BrainSegVolNotVent','eTIV',\
+                       'lh_MeanThickness_thickness'],\
+                      axis = 1).set_index('ID')
+        
+        df2 = pd.read_csv(data_file_42,sep=',',index_col=False ).dropna()
+        
+        df2['ID']=df2['rh.aparc.thickness'].apply(lambda x:  (x[4:13]))
+        df2= df2.drop(['rh.aparc.thickness','BrainSegVolNotVent','eTIV',\
+                       'rh_MeanThickness_thickness'],\
+                        axis = 1).set_index('ID')
+        df = pd.concat([df1, df2], axis=1)
+        
+        attributes = pd.read_csv(data_file_51,sep=',',index_col=False ).dropna()
+        attributes['ID']=attributes['Anonymized ID']
+        attributes= attributes.drop(['Subject Type','Anonymized ID','Visit','R','Native language','Ethnicity'],\
+                        axis = 1).set_index('ID')
+        
+        targ = pd.read_csv(data_file_52,sep=',',index_col=False ).dropna()
+        targ['ID']=targ['Anonymized ID']
+        targ = targ.set_index('ID')
+        targ=targ['BDI Total']
+        
+        ids, df_ids, attributes_ids=[], [], []
+        #First : Creating a double-free ID list of df
+        for a in (set(df.index)-set(doubles(df.index))):
+                df_ids.append(a)
+        #Taking out doubles from : Creating a double-free ID list of df
+        for a in (set(attributes.index)-set(doubles(attributes.index))):
+                attributes_ids.append(a)
+        # Removing all doubles from the selection
+        # Reason : Doubles can't be associated with the BDI
+        for a in (set(targ.index)-set(doubles(targ.index))):
+            if (a in df_ids) & (a in attributes_ids):
+                ids.append(a)
+        
+
+        #Checking for an unseen double (unlikely)
+        assert len(ids) == len(set(ids))
+        
+        final_df = dict()
+        final_attributes= dict()
+        final_targets = dict()
+        
+        for ind in ids :
+#           In case the patient has multiple datas available, raise error
+            if type(df.loc[ind])== type(pd.DataFrame()):
+                raise 'Multiple datas for one ID'
+            else :
+                final_df[ind] = (df.loc[ind])
+                
+        for ind in ids :
+#           In case the patient has multiple datas available, only the first one is selected
+            if type(attributes.loc[ind])== type(pd.DataFrame()):
+                raise 'Multiple attributes for one ID'
+            else :
+                final_attributes[ind] = (attributes.loc[ind])
+                
+        for ind in ids :
+#           In case the patient has multiple attributes available, raise error
+            if type(targ.loc[ind])== type(pd.DataFrame()):
+                raise 'Multiple targets for one ID'
+            else :
+                final_targets[ind] = (targ.loc[ind])
+#        
+        final_df=pd.DataFrame(final_df).transpose()
+        final_attributes=pd.DataFrame(final_attributes).transpose()
+        final_targets=pd.Series(final_targets)
+        
+        #Making sure there are only int type value in the BDI
+        for val in final_targets:
+            try :
+                int(val)
+            except ValueError:
+                final_targets = final_targets.drop( \
+                    final_targets.loc[final_targets==val].index, axis =0)
+
+                
+        print(final_targets.shape)
+        #If you feel like checking anything...        
+#        final_df.to_csv('First results df.csv')
+#        final_attributes.to_csv('First results Att.csv')
+#        final_targets.to_csv('First results target.csv')        
+        
+        result = pd.concat([final_df,final_attributes], axis=1)
+        result['BDI']=final_targets
+        df=  result
+        print('lol')
+        
     else :
         raise
-
+        
     return df
 
 
@@ -309,44 +545,65 @@ def load_data(data_choice = 'cv' ):
 # The df & training + scoring parameter are saved in a pickle dictionnary
     
 def train_tpot(df, gen, pop, name, scorer, save = True,
-               proc=1):
+               proc=1,target='ds', classification=True,
+               config_dict=None, rand=23):
         
-    features = df.drop('ds',axis=1)
-    target = df.ds
+    features = df.drop(target,axis=1)
+    target = df[target]
+    
+    if save :    
+        features.to_csv(path_or_buf=(name + ' features.csv'), index = False)
+        target.to_csv(path=(name + ' targets.csv'), index = False)
+
+#    features = features.values  #Making sure the index names have no influence
+#    target = target.values
+
+#    X_train, X_test, y_train, y_test = train_test_split(
+#            features,target,
+#            train_size=0.75, test_size=0.25)
         
-    X_train, X_test, y_train, y_test = train_test_split(\
-            features,target,
-            train_size=0.75, test_size=0.25)
-        
-        
-    t_pot = TPOTClassifier(generations=gen, population_size=pop, 
-                               verbosity=3,n_jobs=proc, scoring=scorer 
-                               )
-    t_pot.fit(X_train, y_train)
+    if classification :    
+        t_pot = TPOTClassifier(generations=gen, population_size=pop, 
+                                   verbosity=2,n_jobs=proc, scoring=scorer, 
+                                   config_dict=config_dict, random_state=rand)
+    else :
+        t_pot = TPOTRegressor(generations=gen, population_size=pop, 
+                                   verbosity=2,n_jobs=proc, scoring=scorer,
+                                   config_dict=config_dict, random_state=rand)
+
+    t_pot.fit(features, target)
     #t_pot.score(X_test, y_test)
     
-    
+    x=t_pot.fitted_pipeline_
     if save :
         
-        features.to_csv(name + ' features.csv', index = False)
-        target.to_csv(name + ' targets.csv', index = False)
-        
                 
-        t_pot.export((name+'.py'))
+        t_pot.export((name+'model.py'))
         
-        with open((name+'.cfg'), 'wb') as pickle_file:
+        with open((name+'pickled.cfg'), 'wb') as pickle_file:
             pickle.dump({'df': df, 'gen' : gen, 'pop': pop, 'name':name, 
+                         'function' : scorer,'X_test':features,
+                         'y_test':target, 'model':x }, 
+                         pickle_file)
 
-                         'function' : scorer,'X_test':X_test,
-                         'y_test':y_test, 'model':x }, pickle_file)
-    x=t_pot.fitted_pipeline_
     return x
 
-    
 #----------------------------------
+def classifier (x):
+    if x==0:
+        return 'Not depressive'
+    else:
+        return 'Depressive'
+#----------------------------------
+# Score can only be used to quantify Sensitivity and Specificity for DS Scoring
 
 def score(Y_test, Y_pred, verbosity=0):
     #mean_absolute_error(Y_test,Y_pred)
+    Y_pred = pd.Series(Y_pred) # pred = pd.Series for character support
+
+    if Y_test.iloc[0]==0 or Y_test.iloc[0]==1:
+        Y_test= Y_test.apply(classifier)
+        Y_pred= Y_pred.apply(classifier)
     Y_test=Y_test.tolist()
     Y_pred=Y_pred.tolist()
     zipped=zip(Y_test,Y_pred)
@@ -385,47 +642,95 @@ def score(Y_test, Y_pred, verbosity=0):
 
     return {'sens':Sensitivity, 'spec':Specificity}
 
+# Score output doesn't depend on 'score' - can be used for other scores
+# Sens and spec dependent on 'score', should only be used for ds 
 
-
-
-def score_model(data,model, 
-                score=score, verbosity=1, scorer=f1_scorer):
-
-    X = data.drop('ds',axis=1)
-    Y = data.ds
+def score_model(data,model, target = 'ds',
+                score=score, verbosity=1, scorer=f1_scorer, 
+                return_algorythms=False, cv=3):
     
+    X = data.drop(target,axis=1)
+    Y = data[target]
     
-    kf = KFold(n_splits=5,shuffle=True)
-    Results = []
+    if return_algorythms: produced_algorithms=[]
     
-    for train_index, test_index in kf.split(X):
-        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
-        Y_train, Y_test = Y.iloc[train_index], Y.iloc[test_index]
-        m = model
-        m.fit(X_train,Y_train)
-        Y_pred = m.predict(X_test)
-        out = score(Y_test, Y_pred,verbosity = 1)
-        c= f1_scorer(Y_test, Y_pred)
-        Results.append({'sens': out['sens'], 'spec':out['spec'], 'fscore':c})
-    return Results
+    results = pd.DataFrame(columns=['sens', 'spec', 'score']) 
+    
+    for i in range(10) :
+        
+        if return_algorythms: produced_algorithms.append([])
+        
+        kf = KFold(n_splits=cv,shuffle=True)
+        exp = pd.DataFrame(columns=['sens', 'spec', 'score'])
+        for train_index, test_index in kf.split(X):
+            X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+            Y_train, Y_test = Y.iloc[train_index], Y.iloc[test_index]
+            m = model
+            m.fit(X_train,Y_train)
+            Y_pred = m.predict(X_test)
+        
+            out = score(Y_test, Y_pred,verbosity = verbosity)
+        
+            c= scorer(Y_test, Y_pred)
 
+            exp = exp.append({'sens': out['sens'], 'spec':out['spec'], 
+                'score':c}, ignore_index=True)
+                
+            if return_algorythms: produced_algorithms[i].append(m)
+
+        results = results.append({'sens': exp['sens'].mean(), 
+                                  'spec':exp['spec'].mean(), 
+                                  'score':exp['score'].mean()},
+                                ignore_index=True)
+    print(results)   
+    ret=pd.DataFrame({'sens': results['sens'].mean(), 
+                                'spec':results['spec'].mean(), 
+                                'score':results['score'].mean()},index=[0])
+    print(ret)
+    
+    if not(return_algorythms):
+        return ret
+    else :
+        return ret, produced_algorithms
 #----------------------------------
     
 # gathers all steps of the data alteration
 
 def data_preprocessing(name='test', s_filter=ds_2CAT, 
-            drop=['ID','SCOREBDI', 'Gender'], data_choice = 'cv', 
-            normalization=False ,clean= False, th=19,factor = 3,
-            dynamic_drop=False):
+            drop=['ID','SCOREBDI'], data_choice = 'cv', 
+            normalization=False ,clean= False, th=19,
+            factor = 3,dynamic_drop=False,ban_thresh = 10, target = 'ds',
+            gender = None, age = None, undersample = None, rand = 23):
     
     df = categorized(load_data(data_choice),s_filter=s_filter, th=th).copy()
-    df['Gender']= df.Gender.apply(lambda x: 1 if x=='Female' else 0)
+    
+    if target!='Gender':
+        df['Gender']= df.Gender.apply(lambda x: 1 if x=='Female' else 0)
+    
+    #For matching purposes
+    if gender   != None :
+        df = df.loc[(df['Gender'] == gender)]
+    if age      != None :
+        df = df.loc[(df['Age'] < age[1]) & (df['Age'] >= age[0])]
+    if undersample !=None :
+        assert type(undersample) ==int, "Undersample should be an integer"
+        
+        dfd = df.loc[(df['ds'] == ('Depressive')) | (df['ds'] == 1)]
+#        print(dfd.shape)
+        dfnd= df.loc[(df['ds'] == ('Not depressive')) | (df['ds'] == 0)]
+        dfnd = dfnd.sample(n=(undersample*dfd.shape[0]), random_state=rand)
+#                .reset_index(drop=True)
+#        print(dfd.index)
+        df = pd.concat([dfd, dfnd])
+        df = df = shuffle(df)
+
+    #Analyzes for absurd values. Imputation possible. Lots of calculations.
     copy = df.copy()
     
     if normalization:
-        df = analyse_and_clean (df,name=name,
-                                clean = clean, factor = factor,
-                                dynamic_drop=dynamic_drop).copy()
+        df = analyse_and_clean (df,name=name, clean = clean, \
+            factor = factor, dynamic_drop=dynamic_drop, ban_thresh = 10).copy()
+        
         if clean==False and dynamic_drop == False:   
             assert_frame_equal(copy,df,
                         check_exact= True,check_dtype = False, 
@@ -434,7 +739,15 @@ def data_preprocessing(name='test', s_filter=ds_2CAT,
             
     assert copy.keys().all()==df.keys().all(), \
         "Label added or substracted in spite of Arg "
-        
+    
+
+    
+    print(df.shape[0],' patients will be used.')
+    try :
+        print(df.loc[((df['ds'] == 1) | (df['ds'] == 'Depressive'))].shape[0],\
+                 'depressive patients will be used.')
+    except : 
+        pass
     return df.drop(drop,axis=1)
 
 
@@ -443,15 +756,14 @@ def data_preprocessing(name='test', s_filter=ds_2CAT,
 #Creates the evaluation function, shapes the datas and creates + trains the model
 
 
-
-def Pipeline_maker(df, name='test', scorer=f1_scorer,  
-                   pop = 500, gen = 10, th = 19,save=True):
+def Pipeline_maker(df, name='test', scorer=f1_scorer, classification=True,
+                   pop = 500, gen = 10, th = 19,save=True, target='ds',
+                   greater_is_better=True, config_dict=None, rand = 23):
     
-    score_pipe=make_scorer(scorer)
-
-    #print(df.shape)
-    model = train_tpot(df, gen, pop, name, score_pipe, save)
-
+    score_pipe=make_scorer(scorer, greater_is_better=greater_is_better)
+    
+    model = train_tpot(df, gen, pop, name, score_pipe, save, target=target,
+                       classification=classification,config_dict=config_dict, rand=rand)
     
     return model
 
@@ -460,44 +772,83 @@ def Pipeline_maker(df, name='test', scorer=f1_scorer,
 
 
 
-
 def Pipeline_eval (name='test', scorer=f1_scorer,
                    model=None, df= None,
-                   save=True, verbosity=1):
-
+                   save=True, verbosity=1, target='ds', 
+                   classification = True, return_algorythms=False, cv=3, rand = 23):
+    if classification :
+#        if save :
+#            with open((name+'.cfg'), 'rb') as pickle_file:
+#                dic=pickle.load(pickle_file)    
+#                if verbosity >0:
+#                    print("Real test : ")
+#                Pred = model.predict(dic['X_test'])
+#                r1 = score(dic['y_test'],Pred, verbosity =verbosity )
+#                r1['score']=scorer(dic['y_test'],Pred)
+#        else :
+#            r1 = None
+        np.random.seed(rand)
+        if verbosity >0:
+            print(" Reroll : ")
+        r2 = score_model(df, model, cv=cv, target=target, verbosity=verbosity, scorer=scorer,return_algorythms=return_algorythms)
     
-    if save :
-        with open((name+'.cfg'), 'rb') as pickle_file:
-            dic=pickle.load(pickle_file)    
-    
-        print("Real test : ")
-        Pred = model.predict(dic['X_test'])
-        r1 = score(dic['y_test'],Pred, verbosity =1 )
-    else :
-        r1 = None
-        
-    print(" Reroll : ")
-    r2 = score_model(df, model)
-    
+        if not(return_algorythms): return {'r2':r2}
+        else : return {'r2':r2[0]},r2[1] 
 
-    return {'r1': r1,'r2':r2}
+#------------------------------
+# Matplotlib graph generating functions
 
+def pipeline_results_display(results, name, filename = None, save_d= True, 
+                             scorer=f1_scorer):
+    
+    sns.set()
+    plt.axes([0,0,1,1])
+    plt.bar(list(results.keys()),list(results.values()), color='b')
+    plt.xlabel('Type of score', fontsize=24)
+    plt.ylabel('Score', fontsize=24)
+    plt.legend
+    plt.title(name+' True score')
+
+    if save_d:
+        assert filename!=None
+        plt.savefig((filename+' tr.png'))
+    plt.show()
+
+
+
+def pipeline_retest_results_display(results, name, filename = None, 
+                                    save_d= True,scorer=f1_scorer):
+    
+    sns.set()
+    df=pd.DataFrame.from_dict(results)
+
+    #plt.axes([0,0,15,1])
+    
+    plt.bar([str(x+1)+' '+scorer.__name__ for x in range(len(df.iloc[:, 0]))],df.iloc[:, 0], 
+             color='b')
+    plt.bar([str(x+1)+' Sensitivity' for x in range(len(df.iloc[:, 0]))],df.iloc[:, 1], 
+             color='r')
+    plt.bar([str(x+1)+' Specificity' 
+             for x in range(len(df.iloc[:, 0]))],df.iloc[:, 2], color='c')
+    
+    
+    plt.xlabel('Type of score', fontsize=24)
+    plt.ylabel('Score', fontsize=24)
+    plt.legend
+    plt.title(name+' cross validation results')
+
+    if save_d:
+        assert filename!=None
+        plt.savefig((filename+'Graph .png'))
+    plt.xticks(rotation=-45)
+    plt.show()
 
 #------------------------------
 
-def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer, 
-                   drop=['ID','SCOREBDI', 'Gender','Age'], data_choice = 'cv', 
-                   pop = 500, gen = 10, th = 19,save=True, display=True, 
-                   c_display=1,
-                   save_d= True,
-                   norm= False,
-                   clean=False,
-                   factor = 3, dynamic_drop=False):
-
-    
+def assign_filename (name, save):
+    file_name=name
     if save :
-    
-        file_name = './'+ name+'/'+name    
+        file_name = './'+ name+'/'   
         if not os.path.exists(name):
             os.makedirs(name)
             
@@ -509,38 +860,83 @@ def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer,
             file_id = file_id[:-7]
 
             os.makedirs((name+' '+file_id))
-            file_name = './'+ name+' '+file_id+'/'+name
-      
+            file_name = './'+ name+' '+file_id+'/'
+    return file_name
+    
+
+def make_an_excel (name, dir_path):
+
+    writer = pd.ExcelWriter((dir_path+name+'.xlsx'))
+    
+    for filename in os.listdir(dir_path):
+#        print(filename)
+        if filename.endswith(".csv") : 
+#            print('check 2')
+#            print(filename)
+            t = pd.read_csv((dir_path+filename))
+            t.to_excel(writer, sheet_name = filename[:-4], index=False)
+    writer.save()
+#------------------------------
+
+def Run_experiment (name='test', s_filter=ds_2CAT, scorer=f1_scorer, 
+                   drop=['ID','SCOREBDI'], data_choice = 'cv', 
+                   pop = 500, gen = 10, th = 19,save=True, display=True, 
+                   classification=True, greater_is_better=True,config_dict=None,
+                   c_display=1, gender = None, age = None,
+                   save_d= True,
+                   target='ds',
+                   norm= False,
+                   clean=False,
+                   factor = 3, dynamic_drop=False, ban_thresh = 10, rand = 23, 
+                   cv = 3, undersample = None):
+    
+    z = locals()
+    seed(rand)
+    file_name = assign_filename (name, save)
+    pd.Series(z).to_csv(path=(file_name+' experiment variables.csv'))
+    
     df = data_preprocessing(name=file_name, s_filter=s_filter, 
                             drop=drop, data_choice = data_choice, 
                             normalization=norm ,clean= clean, th=th,
-                            factor = factor, dynamic_drop=dynamic_drop)
-
-    df.to_csv(file_name + ' post preprocessing.csv', index = False)
+                            factor = factor, dynamic_drop=dynamic_drop,
+                            ban_thresh = ban_thresh, gender = gender, age =age,
+                            undersample = undersample)
+    
+    #Contains the final data_set, ultimately provided to the pipeline making 
+    #process
+    
+    df.to_csv(path_or_buf=(file_name + ' post preprocessing.csv'))
     
     model = Pipeline_maker (df, name=file_name, scorer=scorer, 
-                            pop = pop, gen = gen, th = th,save=save)
+                            pop = pop, gen = gen, th = th,save=save, 
+                            classification=classification,target = target,
+                            greater_is_better=greater_is_better, config_dict=config_dict, rand=rand)
     
-    results = Pipeline_eval(name=file_name, model=model, df=df, save=save, 
-                            verbosity = c_display,scorer=scorer)
-
+    results = Pipeline_eval(name=file_name, model=clone(model), target = target, 
+                            df=df, save=save, classification=classification,
+                            verbosity = c_display,scorer=scorer,cv=cv)
     
-    results = Pipeline_eval(name=file_name, model=model, df=df, save=save)
+    if (display and classification) :
+#        pipeline_results_display(results['r1'], name, filename=file_name, 
+#                                 save_d=save_d, scorer=scorer)
+        
+        pipeline_retest_results_display(results['r2'], name, 
+                                filename=file_name, 
+                                save_d=save_d, scorer=scorer)
 
-    return results, model
+    if save : make_an_excel(name, file_name)
+    return results,model
 
 
-"""
-def score_model(data,model=v1_model):
-    X = data.drop(['SCOREBDI','ID','Gender','ds'],axis=1)
-    Y = data.ds
-    kf = KFold(n_splits=5)
-    for train_index, test_index in kf.split(X):
-        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
-        Y_train, Y_test = Y.iloc[train_index], Y.iloc[test_index]
-        m = model()
-        m.fit(X_train,Y_train)
-        Y_pred = m.predict(X_test)
-        print(mean_absolute_error(Y_test,Y_pred))
-    return m.fit(X,Y)
-"""
+#---------------------------
+#    
+#df = categorized(load_data('cv'),s_filter=ds_cs_b, th=19) 
+#x=normalize(df)
+##
+##
+##
+#
+#    
+#    
+#    
+    
